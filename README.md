@@ -82,6 +82,50 @@ uv run python -m v3 --backend mcp --url "file://$PWD/examples/03_spa_modal.html"
 ```
 > inhouse（默认）：确定性轨迹→代码，通常一次过。 mcp：官方浏览器控制 + LLM 写码，靠校验/修复闭环保证可跑。
 
+## 真实站点示例（公开网站，均已实测通过）
+
+> 公开站点偶有改版/限流，命令仍然有效，必要时重试或更换站点。覆盖表单 / 点击 / 登录 / 动态内容等常见场景。
+
+```bash
+# v1 · 静态页：单次快照即可断言
+uv run python -m v1 --url "https://example.com" \
+  --description "验证页面标题包含 Example Domain"
+
+# v2 · 表单 + 提交 + 登录（the-internet）
+uv run python -m v2 --url "https://the-internet.herokuapp.com/login" \
+  --description "用户名填 tomsmith，密码填 SuperSecretPassword!，点击 Login，验证出现 You logged into a secure area"
+
+# v2 · 点击 + 动态内容（元素点击后才出现）
+uv run python -m v2 --url "https://the-internet.herokuapp.com/add_remove_elements/" \
+  --description "点击 Add Element 两次，验证出现 Delete 按钮"
+
+# v3 · 登录 + 多场景套件（saucedemo 电商）
+uv run python -m v3 --url "https://www.saucedemo.com/" \
+  --username standard_user --password secret_sauce \
+  --description "登录后验证 Products 标题可见；把 Sauce Labs Backpack 加入购物车后该按钮变为 Remove"
+
+# 表单综合（httpbin 披萨订单：文本框/单选/复选/文本域）— httpbin 偶发 503，恢复后可用
+uv run python -m v2 --url "https://httpbin.org/forms/post" \
+  --description "Customer name 填 Alice，Pizza Size 选 Large，勾选 Bacon，点击 Submit order，验证结果页出现 Alice"
+```
+
+上面 v2 登录示例**实际生成**的用例（来自真实操作轨迹，已 clean-replay 通过）：
+
+```python
+import re
+from playwright.sync_api import Page, expect
+
+
+def test_测试登录到安全区域(page: Page):
+    """填用户名/密码并登录，验证进入安全区域"""
+    page.goto('https://the-internet.herokuapp.com/login')
+    page.get_by_role("textbox", name="Username").fill('tomsmith')
+    page.get_by_role("textbox", name="Password").fill('SuperSecretPassword!')
+    page.get_by_role("button", name="Login").click()
+    expect(page.get_by_text("You logged into a secure area")).to_be_visible()
+    expect(page).to_have_url(re.compile('/secure'))
+```
+
 ## 架构
 
 ```

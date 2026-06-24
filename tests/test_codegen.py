@@ -50,3 +50,4 @@ def test_safe_ident():
     assert _safe_ident("") == "generated"
     assert _safe_ident("123abc").startswith("t_")
     assert _safe_ident("打开设置") == "打开设置"  # 允许 unicode 标识符
+    assert _safe_ident("test_foo") == "foo"  # 不产生 test_test_foo

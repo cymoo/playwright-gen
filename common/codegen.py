@@ -21,6 +21,8 @@ def _pylit(s: str | None) -> str:
 
 def _safe_ident(name: str) -> str:
     s = re.sub(r"\W+", "_", (name or "").strip().lower()).strip("_")
+    if s.startswith("test_"):  # 渲染时会再加 test_ 前缀，避免出现 test_test_xxx
+        s = s[len("test_"):]
     if not s:
         s = "generated"
     if s[0].isdigit():
