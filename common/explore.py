@@ -250,7 +250,9 @@ async def generate_one(
         trace_path = (run_dir / f"trace_{test_path.stem}_{attempt}.zip") if trace else None
         print(f"  [探索] 第 {attempt} 次（{test_name}）")
         try:
-            async with BrowserSession(headless=headless, trace_path=trace_path) as session:
+            async with BrowserSession(
+                headless=headless, slow_mo=0 if headless else 500, trace_path=trace_path
+            ) as session:
                 deps = ExploreDeps(session=session, traj=traj, vision=vision, run_dir=run_dir)
                 await session.goto(url)
                 traj.add("goto", url)

@@ -118,9 +118,10 @@ class Ref:
 class BrowserSession:
     """长连接浏览器会话（整个探索期存活）。"""
 
-    def __init__(self, headless: bool = True, trace_path: Path | None = None):
+    def __init__(self, headless: bool = True, trace_path: Path | None = None, slow_mo: int = 0):
         self.headless = headless
         self.trace_path = trace_path
+        self.slow_mo = slow_mo  # 调试用：有头模式下放慢每步操作，便于肉眼观察
         self._pw = None
         self._browser = None
         self._context = None
@@ -130,7 +131,7 @@ class BrowserSession:
 
     async def __aenter__(self) -> "BrowserSession":
         self._pw = await async_playwright().start()
-        self._browser = await self._pw.chromium.launch(headless=self.headless)
+        self._browser = await self._pw.chromium.launch(headless=self.headless, slow_mo=self.slow_mo)
         self._context = await self._browser.new_context()
         if self.trace_path:
             await self._context.tracing.start(screenshots=True, snapshots=True)

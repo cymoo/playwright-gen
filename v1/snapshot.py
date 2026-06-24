@@ -8,9 +8,9 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 
-def snapshot_page(url: str, out_dir: Path, wait_ms: int = 1500) -> dict:
+def snapshot_page(url: str, out_dir: Path, wait_ms: int = 1500, headed: bool = False) -> dict:
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(headless=not headed)
         try:
             page = browser.new_page()
             console_errors: list[str] = []

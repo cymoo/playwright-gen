@@ -51,13 +51,14 @@ def main() -> None:
     p.add_argument("--wait-ms", type=int, default=1500, help="domcontentloaded 后额外等待 ms")
     p.add_argument("--name", default=None, help="本次运行名称（默认时间戳）")
     p.add_argument("--vision", action="store_true", help="启用 qwen 视觉：对截图生成文本描述补充上下文")
+    p.add_argument("--headed", action="store_true", help="显示浏览器窗口（调试用）")
     args = p.parse_args()
 
     out_dir = make_run_dir(args.out_dir, args.name)
     test_file = out_dir / "test_generated.py"
 
     print(f"[快照] {args.url}")
-    snapshot = snapshot_page(args.url, out_dir, wait_ms=args.wait_ms)
+    snapshot = snapshot_page(args.url, out_dir, wait_ms=args.wait_ms, headed=args.headed)
     print(f"  title: {snapshot['title']}")
 
     vision_desc: str | None = None
