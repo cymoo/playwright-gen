@@ -1,195 +1,161 @@
 # playwright-gen
 
-从 URL + 自然语言描述自动生成可运行的 Playwright 测试用例。基于 [lovia](https://github.com/cymoo/lovia) 驱动 LLM 生成测试代码，并通过 pytest 执行 → 失败自动修复的闭环迭代。
+从 URL + 自然语言描述自动生成**可运行**的 Playwright 测试用例。基于 [lovia](https://github.com/cymoo/lovia) 框架，DeepSeek 为主模型，Qwen 提供视觉。
 
-## 架构
+工具按**目标页面的复杂度**分成 v0 → v3 四档，**每一档都能独立运行**。核心原则是"用最小够用的复杂度"：页面简单时单次生成又快又稳，没必要动用 Agent 驱动浏览器；只有当页面"不操作就无法知道结果"时才升级。
 
-```
-用户输入 (url + description)
-    │
-    ▼
-snapshot.py         → 用 Playwright 抓取页面结构（按钮/输入框/链接/aria 信息）
-    │
-    ▼
-cli.py 循环（最多 MAX_RETRIES 轮）
-    ├── agent.py    → lovia Agent，output_type=GeneratedTest，读取 prompts/generate.md
-    ├── sanitizer.py → 去 markdown fence + AST 校验（导入/test_函数/page.goto）
-    ├── runner.py   → pytest 执行，timeout=60s，保留 head+tail
-    └── 失败 → 把 previous_code + traceback 回灌下一轮
-```
+## 选哪个版本？（按页面复杂度）
 
-## 文件结构
+| 页面/任务复杂度 | 特征 | 版本 | 怎么做 |
+|---|---|---|---|
+| 简单 / 静态 | 元素初始即在 DOM、单页、无需登录 | **v1** | 富 ARIA 快照 → 单次 LLM 生成 |
+| 视觉相关但静态 | 图标按钮 / 弱语义版式 | **v1 --vision** | 加 Qwen 看截图补充文字描述 |
+| 动态 / 交互 | SPA、点击后才出现内容、弹窗、多步流程 | **v2** | Agent 真在浏览器里操作 → 轨迹→代码 |
+| 复杂应用 | 需登录、多视图、一句话要拆成多条用例 | **v3** | Planner 拆场景 → 逐个探索 → 套件 |
 
-```
-playwright-gen/
-├── main.py                         # 入口（thin），委托 playwright_gen.cli:main
-├── pyproject.toml                  # 项目配置 + 依赖 + 控制台入口
-├── playwright_gen/
-│   ├── __init__.py                 # 包初始化，导出核心函数
-│   ├── cli.py                      # CLI 参数解析 + 生成→运行→修复主循环
-│   ├── agent.py                    # lovia Agent 工厂 + GeneratedTest 模型
-│   ├── runner.py                   # run_pytest() — 执行 pytest 并返回结果
-│   ├── sanitizer.py                # sanitize_code() — 去掉 markdown fence + AST 校验
-│   ├── snapshot.py                 # snapshot_page() — Playwright 抓取页面快照
-│   └── prompts/
-│       └── generate.md             # Agent system prompt（选择器策略、代码规范）
-└── README.md
-```
+> v0 是重构前的**盲写基线**（保留作回归对照）。真正的能力跳变在 **v1→v2（静态 vs 必须交互）** 和 **v2→v3（单流程 vs 应用/套件/鉴权）**。
 
-| 文件 | 职责 |
-|------|------|
-| `playwright_gen/cli.py` | CLI 入口（`--url`, `--description`, `--out-dir`, `--wait-ms`）+ 控制循环 |
-| `playwright_gen/snapshot.py` | `snapshot_page(url, out_dir, wait_ms)` → dict（含截图/HTML 路径） |
-| `playwright_gen/sanitizer.py` | `sanitize_code(raw)` → 去 fence + AST 校验 |
-| `playwright_gen/runner.py` | `run_pytest(test_file, timeout=60)` → (passed: bool, output: str) |
-| `playwright_gen/agent.py` | `make_agent()` + `GeneratedTest(code, notes)` Pydantic 模型 |
-| `playwright_gen/prompts/generate.md` | Agent system prompt（独立管理） |
-
-## 环境要求
-
-- Python >= 3.11
-- [uv](https://docs.astral.sh/uv/)（推荐）或 pip
-- Playwright Chromium 浏览器
-
-## 安装
+## 快速开始
 
 ```bash
-# 克隆仓库
-git clone <repo-url> && cd playwright-gen
-
-# 安装依赖
-uv sync
-
-# 安装 Chromium 浏览器（首次使用需要）
-uv run playwright install chromium
+uv sync                              # 安装依赖
+uv run playwright install chromium   # 首次需要
+# .env 见下方；然后任选一个版本：
+uv run python -m v1 --url <URL> --description "<描述>"
+uv run python -m v2 --url <URL> --description "<描述>"
+uv run python -m v3 --url <URL> --description "<描述>"
 ```
 
-## 环境变量
-
-在项目根目录创建 `.env` 文件（参考 `.env.example`）：
+`.env`（DeepSeek 为主；Qwen 仅 `--vision` 时用）：
 
 ```env
 OPENAI_BASE_URL=https://api.deepseek.com
 OPENAI_API_KEY=sk-...
 MODEL=openai:deepseek-v4-flash
+QWEN_BASE_URL=https://.../compatible-mode/v1
+QWEN_API_KEY=sk-...
+QWEN_MODEL=qwen3.7-plus
 MAX_RETRIES=5
 ```
 
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `OPENAI_BASE_URL` | OpenAI 兼容 API 地址 | — |
-| `OPENAI_API_KEY` | API 密钥 | — |
-| `MODEL` | 模型标识（`openai:` 前缀表示 OpenAI 协议） | — |
-| `MAX_RETRIES` | 最大重试轮数 | `5` |
+仓库自带分层基准页面 `examples/`（静态表单 / 图标 / SPA 弹窗 / 登录后台），下面的示例直接用它们。
 
-`lovia` 的 `openai:` 前缀表示使用 OpenAI 兼容协议；`OPENAI_BASE_URL` 会被 lovia OpenAI provider 自动读取，可对接 DeepSeek、OpenRouter、OpenAI 等兼容接口。
+## 各版本
 
-## 用法
-
-### 命令行
-
+### v0 — 盲写基线（重构前实现，原样保留）
+`快照 JSON → LLM 盲写代码 → pytest 裁判 → 失败回灌重试`。一次性看一段文本就写代码，看不到交互后的页面。作为回归基准。
 ```bash
-# 方式一：通过 main.py
-uv run python main.py --url <URL> --description "<描述>"
-
-# 方式二：通过控制台入口（pip install 后可用）
-uv run playwright-gen --url <URL> --description "<描述>"
-
-# 单独运行生成的测试
-uv run pytest output/test_generated.py -v
+uv run python -m v0 --url "https://example.com" --description "点击 Learn more 链接"
 ```
 
-### 参数
+### v1 — 单次生成做对（简单/静态页）
+用 Playwright 的 **ARIA 无障碍树**（role+可见名称+层级）替代 v0 的粗糙提取；`--vision` 时先用 **Qwen 看截图**生成文字描述补充上下文。仍是单次生成 + 校验/重试，便宜、无多轮工具调用风险。
+```bash
+uv run python -m v1 --url "file://$PWD/examples/01_static_form.html" \
+  --description "验证标题为 Acme 周刊，邮箱输入框和订阅按钮都可见"
+# 图标 UI 用视觉：Qwen 能读出 💾/🗑️/🔗 的含义
+uv run python -m v1 --vision --url "file://$PWD/examples/02_visual_icons.html" \
+  --description "验证工具栏有保存、删除、分享三个图标按钮"
+```
+**边界**：v1 只看初始静态快照。对"点击后才出现的内容"它会**诚实地**只断言可见元素并在 notes 里说明无法验证的部分——这正是该升级到 v2 的信号。
 
-| 参数 | 必填 | 说明 | 默认值 |
-|------|------|------|--------|
-| `--url` | 是 | 目标页面 URL | — |
-| `--description` | 是 | 用自然语言描述要验证的行为 | — |
-| `--out-dir` | 否 | 输出根目录，每次运行会在其下自动创建子目录 | `./output` |
-| `--wait-ms` | 否 | `domcontentloaded` 后额外等待毫秒数 | `1500` |
-| `--name` | 否 | 本次运行的子目录名（默认用时间戳，如 `20260617_163000`） | 时间戳 |
+### v2 — Agent 驱动探索（动态/交互页）
+Agent（DeepSeek）在**真实浏览器**里像测试员一样操作：观察（ARIA + ref 快照）→ 点击/输入/断言 → 看新状态。引擎**自动记录每一步真正命中的 locator**，`finalize` 后由 codegen **确定性**渲染为同步 pytest 用例——产出即"已验证可回放"，再做全新浏览器 clean-replay 校验；失败则回灌 traceback 让 Agent 重新探索。
+```bash
+uv run python -m v2 --url "file://$PWD/examples/03_spa_modal.html" \
+  --description "打开设置弹窗，开启深色模式，点击保存，验证出现'设置已保存'提示"
+```
+可选：`--vision`（Qwen `look` 工具）、`--max-steps N`、`--headed`、`--trace`。
 
-每次运行都会在 `--out-dir` 下自动创建独立的子目录（默认以时间戳命名），因此多次运行不会互相覆盖。可通过 `--name` 自定义子目录名。
+### v3 — 规划 + 套件（复杂应用）
+相对 v2 只多一个 **Planner**：把一句话拆成多个**自包含、各自聚焦**的场景（登录等前置并入每个场景，保证每条用例可独立运行），逐个走 v2 引擎，汇总成测试**套件**。
+```bash
+uv run python -m v3 --url "file://$PWD/examples/04_login_app.html" \
+  --username admin --password secret \
+  --description "登录后验证概览有欢迎语，订单标签能看到订单列表，设置标签有退出按钮"
+# → 拆成 3 个场景，各自登录并断言，生成 3 个独立通过的用例
+```
+**可选 MCP 后端**：`--backend mcp` 改用官方 [Playwright MCP](https://github.com/microsoft/playwright-mcp) 驱动浏览器（最稳健的浏览器控制），用例由 LLM 依探索过程编写、经 pytest 校验+修复兜底。需 `uv sync --extra mcp` + Node/npx。
+```bash
+uv run python -m v3 --backend mcp --url "file://$PWD/examples/03_spa_modal.html" \
+  --description "点击打开设置，验证弹出的设置对话框可见"
+```
+> inhouse（默认）：确定性轨迹→代码，通常一次过。 mcp：官方浏览器控制 + LLM 写码，靠校验/修复闭环保证可跑。
 
-## 示例
+## 真实站点示例（公开网站，均已实测通过）
 
-### 示例 1：验证页面跳转
+> 公开站点偶有改版/限流，命令仍然有效，必要时重试或更换站点。覆盖表单 / 点击 / 登录 / 动态内容等常见场景。
 
 ```bash
-uv run python main.py \
-  --url "https://example.com" \
-  --description "点击 Learn more，跳转的页面包含 Further Reading 文本"
+# v1 · 静态页：单次快照即可断言
+uv run python -m v1 --url "https://example.com" \
+  --description "验证页面标题包含 Example Domain"
+
+# v2 · 表单 + 提交 + 登录（the-internet）
+uv run python -m v2 --url "https://the-internet.herokuapp.com/login" \
+  --description "用户名填 tomsmith，密码填 SuperSecretPassword!，点击 Login，验证出现 You logged into a secure area"
+
+# v2 · 点击 + 动态内容（元素点击后才出现）
+uv run python -m v2 --url "https://the-internet.herokuapp.com/add_remove_elements/" \
+  --description "点击 Add Element 两次，验证出现 Delete 按钮"
+
+# v3 · 登录 + 多场景套件（saucedemo 电商）
+uv run python -m v3 --url "https://www.saucedemo.com/" \
+  --username standard_user --password secret_sauce \
+  --description "登录后验证 Products 标题可见；把 Sauce Labs Backpack 加入购物车后该按钮变为 Remove"
+
+# 表单综合（httpbin 披萨订单：文本框/单选/复选/文本域）— httpbin 偶发 503，恢复后可用
+uv run python -m v2 --url "https://httpbin.org/forms/post" \
+  --description "Customer name 填 Alice，Pizza Size 选 Large，勾选 Bacon，点击 Submit order，验证结果页出现 Alice"
 ```
 
-生成的测试会对 `example.com` 拍快照，找到 "Learn more" 链接并点击，然后断言目标页面包含 "Further Reading"。
+上面 v2 登录示例**实际生成**的用例（来自真实操作轨迹，已 clean-replay 通过）：
 
-### 示例 2：搜索表单测试
+```python
+import re
+from playwright.sync_api import Page, expect
 
-```bash
-uv run python main.py \
-  --url "https://www.baidu.com" \
-  --description "在搜索框输入关键词 playwright，提交搜索，验证结果页存在搜索结果条目"
+
+def test_测试登录到安全区域(page: Page):
+    """填用户名/密码并登录，验证进入安全区域"""
+    page.goto('https://the-internet.herokuapp.com/login')
+    page.get_by_role("textbox", name="Username").fill('tomsmith')
+    page.get_by_role("textbox", name="Password").fill('SuperSecretPassword!')
+    page.get_by_role("button", name="Login").click()
+    expect(page.get_by_text("You logged into a secure area")).to_be_visible()
+    expect(page).to_have_url(re.compile('/secure'))
 ```
 
-### 示例 3：登录表单验证
+## 架构
 
-```bash
-uv run python main.py \
-  --url "https://the-internet.herokuapp.com/login" \
-  --description "不输入任何内容直接点击 Login 按钮，验证页面显示用户名或密码无效的错误提示"
+```
+common/                # 薄共享层（所有版本仅依赖它，版本间互不依赖）
+├── models.py          # deepseek_model() / qwen_provider()
+├── io.py · runner.py · sanitizer.py
+├── vision.py          # 用 Qwen 看图返回文本（deepseek 无视觉）
+├── browser.py         # 【v2/v3】async Playwright 会话 + ARIA ref 快照 + 元素解析器
+├── codegen.py         # 【v2/v3】轨迹 → 同步 pytest-playwright 代码
+├── explore.py         # 【v2/v3】lovia 工具 + Explorer Agent + generate_one 流水线
+└── mcp_explore.py     # 【v3 可选】Playwright MCP 后端
+v0/ v1/ v2/ v3/        # 各版本的 CLI 与特有逻辑（python -m vN）
+examples/              # 分层基准页面
 ```
 
-### 示例 4：自定义输出目录和等待时间
+关键设计（与下文 gpt5.5 报告评估对应）：
+- **视觉 = Qwen 工具返回文本**：DeepSeek 不具备视觉，且 lovia 工具返回值是纯文本，故视觉统一由 Qwen 看图、以文字回传给 DeepSeek。
+- **async 全程**：lovia 工具在事件循环里执行，同步 Playwright 会出问题，故 v2/v3 引擎用 async Playwright。
+- **轨迹→代码**：v2/v3 的代码来自探索中真正成功的操作轨迹，而非 LLM 凭记忆盲写。
 
-```bash
-uv run python main.py \
-  --url "https://httpbin.org/forms/post" \
-  --description "填写表单，选择 pizza 作为 topping，填写备注，提交后验证页面显示成功信息" \
-  --out-dir "./results/httpbin" \
-  --wait-ms 3000
-```
+## 对 `docs/plan-v2.md`（gpt5.5 方案）的评估
 
-### 示例 5：使用 --name 避免覆盖
+方向正确并被采纳：Agent 交互式探索、语义定位优先、失败给候选列表、浏览器长连接、视觉可选、max-steps 防死循环。
+本实现的修正：
+1. 把它推迟到"未来"的**轨迹→代码**提前到 v2（最大质量杠杆）。
+2. 元素定位从"文本包含"升级为 **ARIA 无障碍树 + ref 寻址**。
+3. 修正其 `BrowserSession` 用同步 Playwright（在 lovia async 循环里会出错）→ 改 async。
+4. 修正其视觉机制（Agent 调 screenshot 看图）：lovia 工具返回纯文本且 DeepSeek 无视觉 → 改为 Qwen 工具返回文本。
+5. 断言升级为一等公民（assert_* 工具实时校验且记入轨迹）。
 
-```bash
-# 第一次运行 — 自动生成时间戳子目录，如 output/20260617_163000/
-uv run python main.py \
-  --url "https://example.com" \
-  --description "点击 Learn more，跳转的页面包含 Further Reading 文本"
+## 安全边界
 
-# 第二次运行 — 指定名称，输出到 output/learn-more/
-uv run python main.py \
-  --url "https://example.com" \
-  --description "点击 Learn more，跳转的页面包含 Further Reading 文本" \
-  --name "learn-more"
-
-# 每次运行的结果互不覆盖：
-#   output/
-#   ├── 20260617_163000/
-#   │   ├── screenshot.png
-#   │   ├── page.html
-#   │   └── test_generated.py
-#   └── learn-more/
-#       ├── screenshot.png
-#       ├── page.html
-#       └── test_generated.py
-```
-
-## 工作原理
-
-1. **快照阶段** — `snapshot.py` 使用 Playwright 打开目标 URL，提取页面元素（按钮、输入框、链接及 aria 信息），保存截图和 HTML 到输出目录。
-
-2. **生成阶段** — `agent.py` 创建 lovia Agent，将页面快照和用户描述发送给 LLM，要求返回结构化的 `GeneratedTest(code, notes)`。
-
-3. **校验阶段** — `sanitizer.py` 去除 markdown fence，用 AST 校验代码是否包含 playwright 导入、`test_` 函数和 `page.goto()` 调用。
-
-4. **运行阶段** — `runner.py` 执行 `pytest`，若通过则保存测试文件；若失败则将错误日志和上次代码回灌给 LLM，进入下一轮修复。
-
-5. **重试循环** — 最多 `MAX_RETRIES` 轮，每轮 LLM 都收到完整的上下文（快照 + 描述 + 上次代码 + 失败日志），逐步修复直到通过或耗尽重试次数。
-
-## 设计决策
-
-- **选择器优先级**: `get_by_role()` > `get_by_label()` > `get_by_text()` > `data-testid` > CSS — 优先使用语义化选择器，提高测试可维护性。
-- **AST 校验而非字符串匹配**: 避免注释中的 `playwright` 字符串误判，精准检查语法结构。
-- **独立 test function**: 每个测试用例独立（共享 `page` fixture），不依赖执行顺序。
-- **安全边界**: `ast.parse()` 仅做语法校验，非沙箱。本地 CLI 原型使用安全；若作为 Web 服务需容器隔离。
+`sanitize_code()` 仅做 AST 语法校验，不是沙箱。本地 CLI 原型可用；作为 Web 服务需容器隔离。生成的用例会在真实浏览器执行。

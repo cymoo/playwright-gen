@@ -5,3 +5,5 @@ __pycache__/
 .pytest_cache/
 output/
 *.egg-info/
+.idea
+.lovia
