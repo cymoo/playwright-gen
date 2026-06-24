@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>图标编辑器</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; }
+    .toolbar { display: flex; gap: 12px; margin-top: 16px; }
+    .icon-btn { width: 48px; height: 48px; font-size: 22px; border: 1px solid #ccc;
+                border-radius: 8px; background: #fff; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <!-- 复杂度档位 ②：视觉相关但仍静态。按钮只有图标、无可见文字；
+       仍可通过 aria-label 定位，但要"看懂"按钮含义时视觉模型(qwen)更直观。-->
+  <h1>编辑器</h1>
+  <div class="toolbar" role="toolbar" aria-label="编辑工具栏">
+    <button class="icon-btn" aria-label="保存">💾</button>
+    <button class="icon-btn" aria-label="删除">🗑️</button>
+    <button class="icon-btn" aria-label="分享">🔗</button>
+  </div>
+  <p>这些按钮只有图标，没有文字标签。</p>
+</body>
+</html>

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>Acme 周刊</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; }
+    label { display: block; margin-top: 12px; font-weight: 600; }
+    input { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+    button { margin-top: 16px; padding: 10px 20px; }
+  </style>
+</head>
+<body>
+  <!-- 复杂度档位 ①：简单/静态。所有可断言内容初始即在 DOM 中，单次快照即可写对。-->
+  <main>
+    <h1>Acme 周刊</h1>
+    <p>每周一封，关于产品与工程的精选内容。</p>
+    <form id="signup">
+      <label for="email">邮箱地址</label>
+      <input id="email" name="email" type="email" placeholder="you@example.com" required>
+      <label for="name">昵称</label>
+      <input id="name" name="name" type="text" placeholder="可选">
+      <button type="submit">订阅</button>
+    </form>
+    <p id="note">我们承诺不发送垃圾邮件。</p>
+  </main>
+</body>
+</html>

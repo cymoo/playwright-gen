@@ -10,10 +10,10 @@ load_dotenv()
 
 from lovia import Runner
 
-from playwright_gen.agent import GeneratedTest, make_agent
-from playwright_gen.runner import run_pytest
-from playwright_gen.sanitizer import sanitize_code
-from playwright_gen.snapshot import snapshot_page
+from .agent import GeneratedTest, make_agent
+from .runner import run_pytest
+from .sanitizer import sanitize_code
+from .snapshot import snapshot_page
 
 
 def build_prompt(
@@ -86,7 +86,3 @@ def main() -> None:
         failure = output
 
     print(f"\n已达最大重试次数。最后一版: {test_file}")
-
-
-if __name__ == "__main__":
-    main()
