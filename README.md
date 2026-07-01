@@ -63,12 +63,15 @@ npx tsx src/cli.ts v3 --url "file://$PWD/examples/04_login_app.html" \
 
 ### Electron 应用（v2 / v3）
 
-用 `--electron-bin` 指向**打包后的可执行文件**（macOS 传 `.app` 会自动解析出内部二进制），其余与 web 相同。引擎在应用窗口里用同一套 ARIA/ref 快照与忠实定位探索，生成的用例通过 `_electron.launch({ executablePath })` 启动应用回放。
+用 `--electron-bin` 指向**打包后的可执行文件**，其余与 web 相同——**Playwright 的 Electron 驱动跨平台**，macOS / Windows / Linux 均可：macOS 传 `.app`（自动解析出内部二进制），Windows 传 `.exe`，Linux 传可执行文件 / AppImage。引擎在应用窗口里用同一套 ARIA/ref 快照与忠实定位探索，生成的用例通过 `_electron.launch({ executablePath })` 启动应用回放。
 
 ```bash
+# macOS
 npx tsx src/cli.ts v2 --electron-bin "/Applications/YourApp.app" \
   --description "打开设置，切换到深色主题，验证出现深色标记"
-# 需要启动参数时：--electron-args "--flag1 --flag2"
+# Windows： --electron-bin "C:\Program Files\YourApp\YourApp.exe"
+# Linux：   --electron-bin "/opt/YourApp/yourapp"
+# 需要启动参数时：--electron-args "--flag1 --flag2"（CI 无沙箱环境可加 --no-sandbox）
 ```
 
 生成的 Electron 用例形如：

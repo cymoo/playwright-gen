@@ -39,7 +39,9 @@ export function runPlaywright(specFile: string, timeoutMs = 60_000): Promise<Run
     const child = spawn(
       'npx',
       ['playwright', 'test', base, '--reporter=line', '-c', 'playwright.config.ts'],
-      { cwd: dir, env: process.env },
+      // Windows 上 npx 实为 npx.cmd，新版 Node 不允许无 shell 直接 spawn .cmd → Windows 走 shell；
+      // POSIX 保持无 shell（超时时能干净地 kill 进程）。参数均为固定项 + slug 化文件名，shell 安全。
+      { cwd: dir, env: process.env, shell: process.platform === 'win32' },
     );
     let out = '';
     const timer = setTimeout(() => {
