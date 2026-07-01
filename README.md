@@ -1,161 +1,184 @@
 # playwright-gen
 
-从 URL + 自然语言描述自动生成**可运行**的 Playwright 测试用例。基于 [lovia](https://github.com/cymoo/lovia) 框架，DeepSeek 为主模型，Qwen 提供视觉。
+从 URL 或 **Electron 应用** + 自然语言描述，自动生成**可运行**的 Playwright（TypeScript / `@playwright/test`）测试用例。主模型 DeepSeek，视觉用 Qwen；Agent 层直接用 Vercel AI SDK。
 
-工具按**目标页面的复杂度**分成 v0 → v3 四档，**每一档都能独立运行**。核心原则是"用最小够用的复杂度"：页面简单时单次生成又快又稳，没必要动用 Agent 驱动浏览器；只有当页面"不操作就无法知道结果"时才升级。
+工具按**目标复杂度**分 v1 → v3 三档，**每档都能独立运行**。核心原则是"用最小够用的复杂度"：目标简单时单次生成又快又稳，没必要动用 Agent；只有当"不操作就无法知道结果"时才升级。
 
-## 选哪个版本？（按页面复杂度）
+> 本项目由 Python 版重构而来——改用 Node 是为了支持 **Electron**（Playwright 的 Electron 驱动仅 Node 端提供，Python API 没有）。
 
-| 页面/任务复杂度 | 特征 | 版本 | 怎么做 |
+## 选哪个版本？（按目标复杂度）
+
+| 目标复杂度 | 特征 | 版本 | 怎么做 |
 |---|---|---|---|
 | 简单 / 静态 | 元素初始即在 DOM、单页、无需登录 | **v1** | 富 ARIA 快照 → 单次 LLM 生成 |
 | 视觉相关但静态 | 图标按钮 / 弱语义版式 | **v1 --vision** | 加 Qwen 看截图补充文字描述 |
-| 动态 / 交互 | SPA、点击后才出现内容、弹窗、多步流程 | **v2** | Agent 真在浏览器里操作 → 轨迹→代码 |
+| 动态 / 交互 | SPA、点击后才出现内容、弹窗、多步流程；**Electron 应用** | **v2** | Agent 真在浏览器/应用里操作 → 轨迹→代码 |
 | 复杂应用 | 需登录、多视图、一句话要拆成多条用例 | **v3** | Planner 拆场景 → 逐个探索 → 套件 |
 
-> v0 是重构前的**盲写基线**（保留作回归对照）。真正的能力跳变在 **v1→v2（静态 vs 必须交互）** 和 **v2→v3（单流程 vs 应用/套件/鉴权）**。
+> 能力跳变在 **v1→v2**（静态 vs 必须交互）和 **v2→v3**（单流程 vs 应用/套件/鉴权）。Electron 应用天然属于 v2/v3。
 
 ## 快速开始
 
 ```bash
-uv sync                              # 安装依赖
-uv run playwright install chromium   # 首次需要
-# .env 见下方；然后任选一个版本：
-uv run python -m v1 --url <URL> --description "<描述>"
-uv run python -m v2 --url <URL> --description "<描述>"
-uv run python -m v3 --url <URL> --description "<描述>"
+npm install
+npx playwright install chromium   # 首次需要
+cp .env.example .env              # 填入 DeepSeek / Qwen 凭据
 ```
 
 `.env`（DeepSeek 为主；Qwen 仅 `--vision` 时用）：
 
 ```env
-OPENAI_BASE_URL=https://api.deepseek.com
-OPENAI_API_KEY=sk-...
-MODEL=openai:deepseek-v4-flash
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_MODEL=deepseek-chat        # 需支持 function calling（deepseek-reasoner 不支持）
 QWEN_BASE_URL=https://.../compatible-mode/v1
 QWEN_API_KEY=sk-...
-QWEN_MODEL=qwen3.7-plus
+QWEN_MODEL=qwen-vl-plus             # 多模态，仅 --vision 用
 MAX_RETRIES=5
+MAX_STEPS=30
 ```
 
-仓库自带分层基准页面 `examples/`（静态表单 / 图标 / SPA 弹窗 / 登录后台），下面的示例直接用它们。
-
-## 各版本
-
-### v0 — 盲写基线（重构前实现，原样保留）
-`快照 JSON → LLM 盲写代码 → pytest 裁判 → 失败回灌重试`。一次性看一段文本就写代码，看不到交互后的页面。作为回归基准。
-```bash
-uv run python -m v0 --url "https://example.com" --description "点击 Learn more 链接"
-```
-
-### v1 — 单次生成做对（简单/静态页）
-用 Playwright 的 **ARIA 无障碍树**（role+可见名称+层级）替代 v0 的粗糙提取；`--vision` 时先用 **Qwen 看截图**生成文字描述补充上下文。仍是单次生成 + 校验/重试，便宜、无多轮工具调用风险。
-```bash
-uv run python -m v1 --url "file://$PWD/examples/01_static_form.html" \
-  --description "验证标题为 Acme 周刊，邮箱输入框和订阅按钮都可见"
-# 图标 UI 用视觉：Qwen 能读出 💾/🗑️/🔗 的含义
-uv run python -m v1 --vision --url "file://$PWD/examples/02_visual_icons.html" \
-  --description "验证工具栏有保存、删除、分享三个图标按钮"
-```
-**边界**：v1 只看初始静态快照。对"点击后才出现的内容"它会**诚实地**只断言可见元素并在 notes 里说明无法验证的部分——这正是该升级到 v2 的信号。
-
-### v2 — Agent 驱动探索（动态/交互页）
-Agent（DeepSeek）在**真实浏览器**里像测试员一样操作：观察（ARIA + ref 快照）→ 点击/输入/断言 → 看新状态。引擎**自动记录每一步真正命中的 locator**，`finalize` 后由 codegen **确定性**渲染为同步 pytest 用例——产出即"已验证可回放"，再做全新浏览器 clean-replay 校验；失败则回灌 traceback 让 Agent 重新探索。
-```bash
-uv run python -m v2 --url "file://$PWD/examples/03_spa_modal.html" \
-  --description "打开设置弹窗，开启深色模式，点击保存，验证出现'设置已保存'提示"
-```
-可选：`--vision`（Qwen `look` 工具）、`--max-steps N`、`--headed`、`--trace`。
-
-### v3 — 规划 + 套件（复杂应用）
-相对 v2 只多一个 **Planner**：把一句话拆成多个**自包含、各自聚焦**的场景（登录等前置并入每个场景，保证每条用例可独立运行），逐个走 v2 引擎，汇总成测试**套件**。
-```bash
-uv run python -m v3 --url "file://$PWD/examples/04_login_app.html" \
-  --username admin --password secret \
-  --description "登录后验证概览有欢迎语，订单标签能看到订单列表，设置标签有退出按钮"
-# → 拆成 3 个场景，各自登录并断言，生成 3 个独立通过的用例
-```
-**可选 MCP 后端**：`--backend mcp` 改用官方 [Playwright MCP](https://github.com/microsoft/playwright-mcp) 驱动浏览器（最稳健的浏览器控制），用例由 LLM 依探索过程编写、经 pytest 校验+修复兜底。需 `uv sync --extra mcp` + Node/npx。
-```bash
-uv run python -m v3 --backend mcp --url "file://$PWD/examples/03_spa_modal.html" \
-  --description "点击打开设置，验证弹出的设置对话框可见"
-```
-> inhouse（默认）：确定性轨迹→代码，通常一次过。 mcp：官方浏览器控制 + LLM 写码，靠校验/修复闭环保证可跑。
-
-## 真实站点示例（公开网站，均已实测通过）
-
-> 公开站点偶有改版/限流，命令仍然有效，必要时重试或更换站点。覆盖表单 / 点击 / 登录 / 动态内容等常见场景。
+运行（`npx tsx src/cli.ts <版本> ...`，或 `npm run pwgen -- <版本> ...`）：
 
 ```bash
 # v1 · 静态页：单次快照即可断言
-uv run python -m v1 --url "https://example.com" \
+npx tsx src/cli.ts v1 --url "file://$PWD/examples/01_static_form.html" \
+  --description "验证标题包含 Acme 周刊，邮箱输入框和订阅按钮都可见"
+
+# v1 · 图标 UI 用视觉：Qwen 读出 💾/🗑️/🔗 的含义
+npx tsx src/cli.ts v1 --vision --url "file://$PWD/examples/02_visual_icons.html" \
+  --description "验证工具栏有保存、删除、分享三个图标按钮"
+
+# v2 · 动态/交互（SPA 弹窗）
+npx tsx src/cli.ts v2 --url "file://$PWD/examples/03_spa_modal.html" \
+  --description "打开设置弹窗，开启深色模式，点击保存，验证出现'设置已保存'提示"
+
+# v3 · 登录 + 多场景套件
+npx tsx src/cli.ts v3 --url "file://$PWD/examples/04_login_app.html" \
+  --username admin --password secret \
+  --description "登录后验证概览有欢迎语，订单标签能看到订单列表，设置标签有退出按钮"
+```
+
+可选参数：`--vision`、`--headed`、`--max-steps N`、`--trace`（v2/v3），`--name`、`--out-dir`。
+
+### Electron 应用（v2 / v3）
+
+用 `--electron-bin` 指向**打包后的可执行文件**（macOS 传 `.app` 会自动解析出内部二进制），其余与 web 相同。引擎在应用窗口里用同一套 ARIA/ref 快照与忠实定位探索，生成的用例通过 `_electron.launch({ executablePath })` 启动应用回放。
+
+```bash
+npx tsx src/cli.ts v2 --electron-bin "/Applications/YourApp.app" \
+  --description "打开设置，切换到深色主题，验证出现深色标记"
+# 需要启动参数时：--electron-args "--flag1 --flag2"
+```
+
+生成的 Electron 用例形如：
+
+```ts
+import { test, expect, _electron as electron } from '@playwright/test';
+
+test('...', async () => {
+  const electronApp = await electron.launch({ executablePath: '/Applications/YourApp.app/Contents/MacOS/YourApp', args: [] });
+  const page = await electronApp.firstWindow();
+  await page.getByRole('button', { name: '设置' }).click();
+  await expect(page.getByText('深色')).toBeVisible();
+  await electronApp.close();
+});
+```
+
+> Electron 代码路径已实现并通过类型检查与单测；因仓库不含打包二进制，需你用真实应用本地验证。
+
+## 真实站点示例（公开网站，均已实测通过）
+
+```bash
+npx tsx src/cli.ts v1 --url "https://example.com" \
   --description "验证页面标题包含 Example Domain"
 
-# v2 · 表单 + 提交 + 登录（the-internet）
-uv run python -m v2 --url "https://the-internet.herokuapp.com/login" \
+npx tsx src/cli.ts v2 --url "https://the-internet.herokuapp.com/login" \
   --description "用户名填 tomsmith，密码填 SuperSecretPassword!，点击 Login，验证出现 You logged into a secure area"
 
-# v2 · 点击 + 动态内容（元素点击后才出现）
-uv run python -m v2 --url "https://the-internet.herokuapp.com/add_remove_elements/" \
-  --description "点击 Add Element 两次，验证出现 Delete 按钮"
-
-# v3 · 登录 + 多场景套件（saucedemo 电商）
-uv run python -m v3 --url "https://www.saucedemo.com/" \
+npx tsx src/cli.ts v3 --url "https://www.saucedemo.com/" \
   --username standard_user --password secret_sauce \
   --description "登录后验证 Products 标题可见；把 Sauce Labs Backpack 加入购物车后该按钮变为 Remove"
-
-# 表单综合（httpbin 披萨订单：文本框/单选/复选/文本域）— httpbin 偶发 503，恢复后可用
-uv run python -m v2 --url "https://httpbin.org/forms/post" \
-  --description "Customer name 填 Alice，Pizza Size 选 Large，勾选 Bacon，点击 Submit order，验证结果页出现 Alice"
 ```
 
 上面 v2 登录示例**实际生成**的用例（来自真实操作轨迹，已 clean-replay 通过）：
 
-```python
-import re
-from playwright.sync_api import Page, expect
+```ts
+import { test, expect } from '@playwright/test';
 
-
-def test_测试登录到安全区域(page: Page):
-    """填用户名/密码并登录，验证进入安全区域"""
-    page.goto('https://the-internet.herokuapp.com/login')
-    page.get_by_role("textbox", name="Username").fill('tomsmith')
-    page.get_by_role("textbox", name="Password").fill('SuperSecretPassword!')
-    page.get_by_role("button", name="Login").click()
-    expect(page.get_by_text("You logged into a secure area")).to_be_visible()
-    expect(page).to_have_url(re.compile('/secure'))
+test('测试登录到安全区域', async ({ page }) => {
+  await page.goto('https://the-internet.herokuapp.com/login');
+  await page.getByRole('textbox', { name: 'Username' }).fill('tomsmith');
+  await page.getByRole('textbox', { name: 'Password' }).fill('SuperSecretPassword!');
+  await page.getByRole('button', { name: 'Login' }).click();
+  await expect(page.getByText('You logged into a secure area')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp('/secure'));
+});
 ```
+
+## 运行 / 调试生成的用例
+
+生成过程本身已用全新浏览器上下文跑通了每条用例（clean-replay），所以"生成通过"即"可回放通过"。产物在 `output/<run>/` 下，每个 run 目录会自带一份极简 `playwright.config.ts`（`testDir: '.'`）——**进入该目录直接用 Playwright 跑即可**：
+
+```bash
+cd output/<run>                               # 例如 output/20260701_181134
+npx playwright test                           # 跑该目录下全部用例（v3 是整个套件）
+npx playwright test test_generated.spec.ts    # 只跑某个文件
+npx playwright test --headed                  # 有头模式观察
+npx playwright test --debug                   # 单步调试（Playwright Inspector）
+npx playwright test --ui                      # UI 模式
+```
+
+HTML 报告 / 查看 trace：
+
+```bash
+npx playwright test --reporter=html && npx playwright show-report
+# 若生成时加了 --trace，run 目录下会有 trace_*.zip：
+npx playwright show-trace trace_*.zip
+```
+
+说明：
+
+- 生成的用例里 URL / Electron `executablePath` 都是**绝对路径**，可独立回放；但请在**本项目目录内**运行——用例 `import { test } from '@playwright/test'`，依赖仓库的 `node_modules`。
+- 从仓库根目录直接 `npx playwright test output/<run>/xxx.spec.ts` **不会命中**（根 `playwright.config.ts` 的 `testDir` 是 `./tests`）：请 `cd` 进 run 目录，或显式指定 `-c output/<run>/playwright.config.ts`。
 
 ## 架构
 
 ```
-common/                # 薄共享层（所有版本仅依赖它，版本间互不依赖）
-├── models.py          # deepseek_model() / qwen_provider()
-├── io.py · runner.py · sanitizer.py
-├── vision.py          # 用 Qwen 看图返回文本（deepseek 无视觉）
-├── browser.py         # 【v2/v3】async Playwright 会话 + ARIA ref 快照 + 元素解析器
-├── codegen.py         # 【v2/v3】轨迹 → 同步 pytest-playwright 代码
-├── explore.py         # 【v2/v3】lovia 工具 + Explorer Agent + generate_one 流水线
-└── mcp_explore.py     # 【v3 可选】Playwright MCP 后端
-v0/ v1/ v2/ v3/        # 各版本的 CLI 与特有逻辑（python -m vN）
-examples/              # 分层基准页面
+src/
+├── common/            # 薄共享层（各版本仅依赖它，版本间互不依赖）
+│   ├── models.ts      # deepseek（主）/ qwen（视觉）：createOpenAICompatible
+│   ├── vision.ts      # 用 Qwen 看图返回文本（DeepSeek 无视觉）
+│   ├── trajectory.ts  # 结构化轨迹：LocatorDescriptor / Step / TargetSpec
+│   ├── locators.ts    # 定位描述符推导 + 渲染（纯函数，可单测）
+│   ├── browser.ts     # 【v2/v3】统一 web/electron 的 Session：ARIA+ref 快照 + 忠实定位 + 操作/断言
+│   ├── codegen.ts     # 【v2/v3】轨迹 → @playwright/test 代码（web / electron 两形态）
+│   ├── explore.ts     # 【v2/v3】AI SDK 工具 + Explorer 循环 + generateOne（探索→codegen→运行→修复）
+│   ├── runner.ts      # 用 playwright test 裁判（clean-replay）
+│   └── io.ts · sanitizer.ts
+├── v1/                # 单次生成（generateObject）+ prompts/generate.md
+├── v2/                # Agent 探索 CLI 入口
+├── v3/                # planner（generateObject）+ 套件 CLI 入口
+└── cli.ts             # 统一 pwgen v1|v2|v3（commander）
+examples/              # 分层基准页面（① 静态 ② 图标 ③ SPA 弹窗 ④ 登录后台）
+tests/                 # 纯逻辑单测（locators / codegen / sanitizer）
 ```
 
-关键设计（与下文 gpt5.5 报告评估对应）：
-- **视觉 = Qwen 工具返回文本**：DeepSeek 不具备视觉，且 lovia 工具返回值是纯文本，故视觉统一由 Qwen 看图、以文字回传给 DeepSeek。
-- **async 全程**：lovia 工具在事件循环里执行，同步 Playwright 会出问题，故 v2/v3 引擎用 async Playwright。
-- **轨迹→代码**：v2/v3 的代码来自探索中真正成功的操作轨迹，而非 LLM 凭记忆盲写。
+## 关键设计
 
-## 对 `docs/plan-v2.md`（gpt5.5 方案）的评估
+- **忠实定位（execute == record）**：探索时先据元素元数据推导语义定位描述符，再用 Playwright **自己的枚举**校验它唯一命中到该元素（必要时按真实序号修复 nth），只有校验通过才执行并记录。因此"生成代码里的定位 === 探索时真正点中的定位"，且消除了手写可访问名近似导致的偏差；表单控件（含无 textbox role 的 password）额外用 `getByLabel` 兜底。`data-pwref` 仅作 Agent 寻址句柄。
+- **轨迹 → 代码**：v2/v3 的代码来自探索中**真正成功执行**的操作轨迹（结构化描述符），按 `TargetSpec` 确定性渲染为 web 或 electron 两形态——产出即"已验证可回放"。
+- **verify → repair**：生成后用全新上下文 clean-replay；失败把日志回灌、重新探索。
+- **视觉 = Qwen 工具返回文本**：DeepSeek 无视觉，`--vision` 时由 Qwen 看图、以文字回传给 DeepSeek。
+- **Agent 层 = Vercel AI SDK**：`generateText` + 工具 + `stopWhen`（步数上限 / `finalize` 触发）；结构化输出用 `generateObject`。未引入更重的 Agent 框架。
 
-方向正确并被采纳：Agent 交互式探索、语义定位优先、失败给候选列表、浏览器长连接、视觉可选、max-steps 防死循环。
-本实现的修正：
-1. 把它推迟到"未来"的**轨迹→代码**提前到 v2（最大质量杠杆）。
-2. 元素定位从"文本包含"升级为 **ARIA 无障碍树 + ref 寻址**。
-3. 修正其 `BrowserSession` 用同步 Playwright（在 lovia async 循环里会出错）→ 改 async。
-4. 修正其视觉机制（Agent 调 screenshot 看图）：lovia 工具返回纯文本且 DeepSeek 无视觉 → 改为 Qwen 工具返回文本。
-5. 断言升级为一等公民（assert_* 工具实时校验且记入轨迹）。
+## 相对 Python 版的改动
+
+- Python → **Node + TypeScript**（ESM，用 `tsx` 直跑）；pytest-playwright → **@playwright/test**（async/await）。
+- 新增 **Electron** 目标（`--electron-bin`）；lovia → **Vercel AI SDK**；去掉了 v0 盲写基线与可选的 MCP 后端。
+- 定位从"记录一个另行推导的表达式"升级为**忠实定位**（执行即记录、逐个校验唯一命中）。
+- v1/v2/v3 共用同一套快照逻辑；探索不再用固定 sleep，改靠 Playwright 自动等待。
 
 ## 安全边界
 
-`sanitize_code()` 仅做 AST 语法校验，不是沙箱。本地 CLI 原型可用；作为 Web 服务需容器隔离。生成的用例会在真实浏览器执行。
+`sanitizeCode()` 只做去 fence + 基本标记校验，不是沙箱。生成的用例会在真实浏览器/应用中执行；作为服务使用需容器隔离。
