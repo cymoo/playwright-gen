@@ -1,9 +1,10 @@
 /**
- * 用 @playwright/test 运行生成的用例并裁判（所有版本共用）。
+ * 用 @playwright/test 运行生成的用例并裁判(clean-replay)。
  *
- * 判定：`npx playwright test <file>` 的退出码，0=通过、非 0=失败。
- * 每个 run 目录自带一份极简 playwright.config.ts（testDir: '.'），
- * 以便脱离仓库根配置独立运行该目录下的生成用例，且拿到全新浏览器上下文（clean-replay）。
+ * 判定:`npx playwright test <file>` 的退出码,0=通过、非 0=失败。
+ * 每个 run 目录自带一份极简 playwright.config.ts(testDir: '.'),
+ * 以便脱离仓库根配置独立运行该目录下的生成用例,且拿到全新浏览器上下文。
+ * 用例自身的超时由生成代码里的 test.setTimeout 控制(按轨迹计算,含长等待)。
  */
 
 import { spawn } from 'node:child_process';
@@ -15,7 +16,6 @@ const RUN_CONFIG = `import { defineConfig } from '@playwright/test';
 export default defineConfig({
   testDir: '.',
   reporter: 'line',
-  timeout: 30_000,
   use: { trace: 'off' },
 });
 `;
@@ -30,7 +30,7 @@ export interface RunResult {
   output: string;
 }
 
-export function runPlaywright(specFile: string, timeoutMs = 60_000): Promise<RunResult> {
+export function runPlaywright(specFile: string, timeoutMs = 120_000): Promise<RunResult> {
   const dir = dirname(specFile);
   const base = basename(specFile);
   ensureRunConfig(dir);
@@ -39,13 +39,13 @@ export function runPlaywright(specFile: string, timeoutMs = 60_000): Promise<Run
     const child = spawn(
       'npx',
       ['playwright', 'test', base, '--reporter=line', '-c', 'playwright.config.ts'],
-      // Windows 上 npx 实为 npx.cmd，新版 Node 不允许无 shell 直接 spawn .cmd → Windows 走 shell；
-      // POSIX 保持无 shell（超时时能干净地 kill 进程）。参数均为固定项 + slug 化文件名，shell 安全。
+      // Windows 上 npx 实为 npx.cmd,新版 Node 不允许无 shell 直接 spawn .cmd → Windows 走 shell;
+      // POSIX 保持无 shell(超时时能干净地 kill 进程)。参数均为固定项 + slug 化文件名,shell 安全。
       { cwd: dir, env: process.env, shell: process.platform === 'win32' },
     );
     let out = '';
     const timer = setTimeout(() => {
-      out += `\n[playwright 超时，超过 ${timeoutMs}ms]`;
+      out += `\n[playwright 超时,超过 ${timeoutMs}ms]`;
       child.kill('SIGKILL');
     }, timeoutMs);
     child.stdout.on('data', (d) => (out += d.toString()));
@@ -56,7 +56,7 @@ export function runPlaywright(specFile: string, timeoutMs = 60_000): Promise<Run
     });
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ passed: false, output: `启动 playwright 失败：${String(e)}` });
+      resolve({ passed: false, output: `启动 playwright 失败:${String(e)}` });
     });
   });
 }

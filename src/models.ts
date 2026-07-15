@@ -1,11 +1,11 @@
 /**
- * 模型接入（所有版本共用）。
+ * 模型接入。
  *
- * - deepseek：主模型，负责推理 / 工具调用 / codegen（纯文本）。用 deepseek-chat 系
- *   （reasoner 不支持 function calling）。
- * - qwen：多模态模型，仅用于"看截图"，返回文本描述（deepseek 不具备视觉）。
+ * - deepseek:主模型,负责推理 / 工具调用(纯文本)。用 deepseek-chat 系
+ *   (reasoner 不支持 function calling)。
+ * - qwen:多模态模型,仅用于"看截图",返回文本描述(deepseek 不具备视觉)。
  *
- * 两者均为 OpenAI 兼容接口，经 AI SDK 的 createOpenAICompatible 接入。
+ * 两者均为 OpenAI 兼容接口,经 AI SDK 的 createOpenAICompatible 接入。
  */
 
 import 'dotenv/config';
@@ -14,7 +14,7 @@ import type { LanguageModel } from 'ai';
 
 function required(key: string): string {
   const v = process.env[key];
-  if (!v) throw new Error(`缺少环境变量 ${key}（见 .env.example）`);
+  if (!v) throw new Error(`缺少环境变量 ${key}(见 .env.example)`);
   return v;
 }
 
@@ -44,10 +44,7 @@ export function qwenModel(): LanguageModel {
   return _qwen;
 }
 
-export function maxRetries(dflt = 5): number {
-  return parseInt(process.env.MAX_RETRIES ?? '', 10) || dflt;
-}
-
-export function maxSteps(dflt = 30): number {
+/** 每个步骤的最大探索轮数(LLM 回合数),env MAX_STEPS 可覆盖。 */
+export function envMaxSteps(dflt = 30): number {
   return parseInt(process.env.MAX_STEPS ?? '', 10) || dflt;
 }

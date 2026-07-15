@@ -1,17 +1,17 @@
 /**
- * 浏览器/应用会话引擎（v2/v3 共用）。
+ * 浏览器/应用会话引擎。
  *
- * 统一 web 与 electron：两者最终都归一到一个 Playwright `Page`（electron 用
- * firstWindow()），因此 ARIA + data-pwref 快照、定位、操作、断言全部共享。
+ * 统一 web 与 electron:两者最终都归一到一个 Playwright `Page`(electron 用
+ * firstWindow()),因此 ARIA + data-pwref 快照、定位、操作、断言全部共享。
  *
- * 元素定位（最难的部分）+ 本次重构第 1 项优化（忠实定位）：
- * - 一段 JS 一次性扫描可交互元素，算 role / 可见名称 / 同名重复数，并打上 data-pwref。
- *   data-pwref 只作 Agent 的"寻址句柄"（agent 说 click("e3")）。
- * - 真正执行与记录用**同一个语义定位描述符**：resolve() 先据元素元数据推导描述符，
- *   再用 Playwright 自己的枚举**校验它唯一命中到该 data-pwref 元素**（必要时据
- *   Playwright 的真实序号修复 nth）。只有校验通过才执行+记录——从而
+ * 元素定位(最难的部分)——忠实定位:
+ * - 一段 JS 一次性扫描可交互元素,算 role / 可见名称 / 同名重复数,并打上 data-pwref。
+ *   data-pwref 只作 Agent 的"寻址句柄"(agent 说 click("e3"))。
+ * - 真正执行与记录用**同一个语义定位描述符**:resolve() 先据元素元数据推导描述符,
+ *   再用 Playwright 自己的枚举**校验它唯一命中到该 data-pwref 元素**(必要时据
+ *   Playwright 的真实序号修复 nth)。只有校验通过才执行+记录——从而
  *   "生成代码里的定位 === 探索时真正点中的定位"。校验不过则回退文本描述符或
- *   返回候选让 Agent 自纠，绝不记录一个没真正执行过的定位。
+ *   返回候选让 Agent 自纠,绝不记录一个没真正执行过的定位。
  */
 
 import {
@@ -33,9 +33,14 @@ import { candidateDescriptors, type SnapshotItem } from './locators';
 const INTERACTIVE_SELECTOR =
   'button,[role=button],a[href],[role=link],input:not([type=hidden]),' +
   'textarea,select,[role=checkbox],[role=radio],[role=switch],[role=tab],' +
-  '[role=menuitem],[role=option]';
+  '[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],' +
+  '[role=combobox],[role=treeitem],summary';
 
-/** 生成在浏览器里执行的扫描脚本（IIFE，返回可交互元素元数据数组并打 data-pwref）。 */
+/** 操作类动作的超时(重型应用的界面切换可能较慢);断言保持 5s,与回放默认一致。 */
+const ACTION_TIMEOUT = 10_000;
+const ASSERT_TIMEOUT = 5_000;
+
+/** 生成在浏览器里执行的扫描脚本(IIFE,返回可交互元素元数据数组并打 data-pwref)。 */
 function snapshotScript(sel: string): string {
   return `(() => {
   const sel = ${JSON.stringify(sel)};
@@ -54,6 +59,7 @@ function snapshotScript(sel: string): string {
     if (tag === 'button') return 'button';
     if (tag === 'select') return 'combobox';
     if (tag === 'textarea') return 'textbox';
+    if (tag === 'summary') return 'button';
     if (tag === 'input') {
       const t = (el.getAttribute('type') || 'text').toLowerCase();
       if (t === 'checkbox') return 'checkbox';
@@ -80,6 +86,7 @@ function snapshotScript(sel: string): string {
     testid: el.getAttribute('data-testid') || '',
     tag: el.tagName.toLowerCase(),
     type: (el.getAttribute('type') || '').toLowerCase(),
+    checked: (el.getAttribute('aria-checked') === 'true') || !!el.checked || false,
     sameKeyIndex: 0, sameKeyCount: 0, roleIndex: 0, roleCount: 0,
   }));
   const kc = {}, rc = {};
@@ -105,7 +112,12 @@ interface Ref {
   candidates: LocatorDescriptor[];
 }
 
-/** 据描述符构造实时 Playwright Locator（与 codegen.renderLocator 一一对应）。 */
+/** 快照条目附带的选中态(供 Agent 判断开关/复选框当前状态)。 */
+interface ScanItem extends SnapshotItem {
+  checked?: boolean;
+}
+
+/** 据描述符构造实时 Playwright Locator(与 codegen.renderLocator 一一对应)。 */
 export function buildLocator(page: Page, d: LocatorDescriptor): Locator {
   let loc: Locator;
   switch (d.kind) {
@@ -146,8 +158,8 @@ async function elementIsRef(loc: Locator, ref: string): Promise<boolean> {
   }
 }
 
-function resolveElectronBinary(p: string): string {
-  // macOS: MyApp.app → MyApp.app/Contents/MacOS/<可执行文件>
+/** macOS: MyApp.app → MyApp.app/Contents/MacOS/<可执行文件>;其他平台原样返回。 */
+export function resolveElectronBinary(p: string): string {
   if (p.endsWith('.app')) {
     const macos = join(p, 'Contents', 'MacOS');
     if (existsSync(macos)) {
@@ -212,23 +224,25 @@ export class Session {
 
   // ---- 观察 ----
 
-  /** 仅 web：导航。electron 无 goto（启动即打开）。不使用硬等待，靠自动等待。 */
+  /** 仅 web:导航。electron 无 goto(启动即打开)。不使用硬等待,靠自动等待。 */
   async goto(url: string): Promise<void> {
     await this.page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 });
   }
 
   async snapshot(): Promise<string> {
-    const items = (await this.page.evaluate(snapshotScript(INTERACTIVE_SELECTOR))) as SnapshotItem[];
+    const items = (await this.page.evaluate(snapshotScript(INTERACTIVE_SELECTOR))) as ScanItem[];
     this.refs = new Map();
     const lines: string[] = [];
     items.forEach((it, i) => {
       const ref = `e${i + 1}`;
       this.refs.set(ref, { ref, role: it.role || '', name: it.name || '', candidates: candidateDescriptors(it) });
       const shown = it.name || it.placeholder || '(无名)';
-      lines.push(`${ref}  ${it.role || ''}  "${shown}"`);
+      const checkable = it.role === 'checkbox' || it.role === 'radio' || it.role === 'switch';
+      const state = checkable ? (it.checked ? ' [已选中]' : ' [未选中]') : '';
+      lines.push(`${ref}  ${it.role || ''}  "${shown}"${state}`);
     });
     let aria = await this.page.locator('body').ariaSnapshot();
-    if (aria.length > 3000) aria = aria.slice(0, 3000) + '\n…（ARIA 已截断）';
+    if (aria.length > 3000) aria = aria.slice(0, 3000) + '\n…(ARIA 已截断)';
     const actionable = lines.length ? lines.join('\n') : '(无可交互元素)';
     const title = await this.page.title();
     const errs = this.consoleErrors.length
@@ -236,22 +250,22 @@ export class Session {
       : '';
     return (
       `URL: ${this.page.url()}\n标题: ${title}${errs}\n\n` +
-      `可交互元素（用 ref 操作，如 click("e1")）:\n${actionable}\n\n` +
+      `可交互元素(用 ref 操作,如 click("e1")):\n${actionable}\n\n` +
       `ARIA 快照:\n${aria}`
     );
   }
 
   private refsBrief(): string {
-    if (this.refs.size === 0) return '(当前无已知可交互元素，请先调用 get_page_state)';
+    if (this.refs.size === 0) return '(当前无已知可交互元素,请先调用 get_page_state)';
     return [...this.refs.values()].map((r) => `${r.ref} ${r.role} "${r.name}"`).join('\n');
   }
 
-  // ---- 定位（忠实：执行的 locator === 记录的描述符）----
+  // ---- 定位(忠实:执行的 locator === 记录的描述符)----
 
-  /** 校验/修复 guess 描述符，使其唯一命中 data-pwref=ref 的元素；不行返回 null。 */
+  /** 校验/修复 guess 描述符,使其唯一命中 data-pwref=ref 的元素;不行返回 null。 */
   private async faithfulDescriptor(ref: string, guess: LocatorDescriptor): Promise<LocatorDescriptor | null> {
     if (await elementIsRef(buildLocator(this.page, guess), ref)) return guess;
-    // 据 Playwright 自己的枚举修复 nth（对齐真实序号，消除手写 accname 近似导致的偏差）
+    // 据 Playwright 自己的枚举修复 nth(对齐真实序号,消除手写 accname 近似导致的偏差)
     const base = buildLocator(this.page, { ...guess, nth: undefined } as LocatorDescriptor);
     const n = await base.count();
     if (n > 1 && n <= 50) {
@@ -265,7 +279,7 @@ export class Session {
   async resolve(target: string): Promise<{ locator: Locator; descriptor: LocatorDescriptor }> {
     const t = (target || '').trim();
 
-    // 1. 命中已知 ref（直接 e3，或据可见名称唯一匹配到某 ref）
+    // 1. 命中已知 ref(直接 e3,或据可见名称唯一匹配到某 ref)
     let ref: string | undefined;
     if (this.refs.has(t)) {
       ref = t;
@@ -275,66 +289,72 @@ export class Session {
       if (matches.length === 1) ref = matches[0].ref;
       else if (matches.length > 1) {
         const cands = matches.map((m) => `${m.ref}("${m.name}")`).join(', ');
-        throw new ResolveError(`"${target}" 匹配到多个可交互元素：${cands}。请用具体 ref。`);
+        throw new ResolveError(`"${target}" 匹配到多个可交互元素:${cands}。请用具体 ref。`);
       }
     }
 
     if (ref) {
       const r = this.refs.get(ref)!;
-      // 逐个候选校验忠实性（执行 == 记录），取第一个能唯一命中该元素的
+      // 逐个候选校验忠实性(执行 == 记录),取第一个能唯一命中该元素的
       for (const cand of r.candidates) {
         const faithful = await this.faithfulDescriptor(ref, cand);
         if (faithful) return { locator: buildLocator(this.page, faithful), descriptor: faithful };
       }
       throw new ResolveError(
-        `"${target}" 无法推导出稳定唯一的语义定位，请换用更明确的元素或 ref。当前：\n${this.refsBrief()}`,
+        `"${target}" 无法推导出稳定唯一的语义定位,请换用更明确的元素或 ref。当前:\n${this.refsBrief()}`,
       );
     }
 
-    // 2. 文本兜底（适合断言目标：提示 / 标题文本）
+    // 2. 文本兜底(适合断言目标:提示 / 标题文本)
     const byText = this.page.getByText(t);
     const cnt = await byText.count();
     if (cnt === 1) return { locator: byText, descriptor: { kind: 'text', text: t } };
     if (cnt > 1) return { locator: byText.first(), descriptor: { kind: 'text', text: t, nth: 0 } };
-    throw new ResolveError(`未找到匹配 "${target}" 的元素。当前可交互元素：\n${this.refsBrief()}`);
+    throw new ResolveError(`未找到匹配 "${target}" 的元素。当前可交互元素:\n${this.refsBrief()}`);
   }
 
-  // ---- 行动（返回记录用的描述符）----
+  // ---- 行动(返回记录用的描述符)----
 
   async click(target: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.click({ timeout: 5000 });
+    await locator.click({ timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
   async fill(target: string, text: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.fill(text, { timeout: 5000 });
+    await locator.fill(text, { timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
   async check(target: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.check({ timeout: 5000 });
+    await locator.check({ timeout: ACTION_TIMEOUT });
+    return descriptor;
+  }
+
+  async uncheck(target: string): Promise<LocatorDescriptor> {
+    const { locator, descriptor } = await this.resolve(target);
+    await locator.uncheck({ timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
   async selectOption(target: string, value: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.selectOption(value, { timeout: 5000 });
+    await locator.selectOption(value, { timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
   async hover(target: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.hover({ timeout: 5000 });
+    await locator.hover({ timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
   async press(key: string, target?: string): Promise<LocatorDescriptor | undefined> {
     if (target) {
       const { locator, descriptor } = await this.resolve(target);
-      await locator.press(key, { timeout: 5000 });
+      await locator.press(key, { timeout: ACTION_TIMEOUT });
       return descriptor;
     }
     await this.page.keyboard.press(key);
@@ -348,26 +368,42 @@ export class Session {
     else if (direction === 'top') await this.page.evaluate('window.scrollTo(0, 0)');
   }
 
-  // ---- 断言（实时校验 + 返回描述符供记录）----
+  // ---- 断言 / 等待(实时校验 + 返回描述符供记录)----
 
   async assertVisible(target: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await expect(locator).toBeVisible({ timeout: 5000 });
+    await expect(locator).toBeVisible({ timeout: ASSERT_TIMEOUT });
     return descriptor;
   }
 
   async assertText(target: string, text: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await expect(locator).toContainText(text, { timeout: 5000 });
+    await expect(locator).toContainText(text, { timeout: ASSERT_TIMEOUT });
     return descriptor;
   }
 
   async assertUrl(pattern: string): Promise<void> {
-    await expect(this.page).toHaveURL(new RegExp(pattern), { timeout: 5000 });
+    await expect(this.page).toHaveURL(new RegExp(pattern), { timeout: ASSERT_TIMEOUT });
   }
 
   async assertTitle(pattern: string): Promise<void> {
-    await expect(this.page).toHaveTitle(new RegExp(pattern), { timeout: 5000 });
+    await expect(this.page).toHaveTitle(new RegExp(pattern), { timeout: ASSERT_TIMEOUT });
+  }
+
+  /**
+   * 等待某文本/元素出现并可见(录制、加载、跳转等耗时过程)。
+   * 目标不必当前就在页面上:已知 ref 走忠实定位,否则用 getByText(t).first() 等待出现。
+   */
+  async waitFor(target: string, timeoutMs: number): Promise<LocatorDescriptor> {
+    const t = (target || '').trim();
+    if (this.refs.has(t)) {
+      const { locator, descriptor } = await this.resolve(t);
+      await expect(locator).toBeVisible({ timeout: timeoutMs });
+      return descriptor;
+    }
+    const d: LocatorDescriptor = { kind: 'text', text: t, nth: 0 };
+    await expect(buildLocator(this.page, d)).toBeVisible({ timeout: timeoutMs });
+    return d;
   }
 
   async screenshot(path: string): Promise<string> {

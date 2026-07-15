@@ -1,11 +1,10 @@
 /**
- * 定位描述符的推导与渲染（纯函数，可单测）。
+ * 定位描述符的推导与渲染(纯函数,可单测)。
  *
- * - `descriptorFor`：据快照阶段扫描出的元素元数据，推导**唯一的语义定位描述符**
- *   （旧 Python 里的 expr_for，改为返回结构化描述符）。
- * - `renderLocator`：把描述符渲染为 Playwright locator 表达式（供 codegen 用）。
+ * - `candidateDescriptors`:据快照阶段扫描出的元素元数据,推导**有序候选**语义定位描述符。
+ * - `renderLocator`:把描述符渲染为 Playwright locator 表达式(供 codegen 用)。
  *
- * 二者与 browser 里的 `buildLocator`（据同一描述符构造实时 Locator）配套，
+ * 二者与 browser 里的 `buildLocator`(据同一描述符构造实时 Locator)配套,
  * 共同保证"执行的定位 === 记录的定位"。
  */
 
@@ -19,18 +18,18 @@ export interface SnapshotItem {
   testid: string;
   tag: string;
   type: string;
-  sameKeyIndex: number; // 同 (role+name) 的第几个（0 基）
+  sameKeyIndex: number; // 同 (role+name) 的第几个(0 基)
   sameKeyCount: number; // 同 (role+name) 的总数
-  roleIndex: number; // 同 role 的第几个（0 基）
+  roleIndex: number; // 同 role 的第几个(0 基)
   roleCount: number; // 同 role 的总数
 }
 
 /**
  * 据元素元数据推导**有序候选**语义定位描述符列表。
- * resolve() 会逐个用 Playwright 自己的枚举校验，取第一个能唯一命中该元素的候选
- * （必要时修复 nth）——因此这里给的是"优先尝试顺序"，正确性由校验保证。
+ * resolve() 会逐个用 Playwright 自己的枚举校验,取第一个能唯一命中该元素的候选
+ * (必要时修复 nth)——因此这里给的是"优先尝试顺序",正确性由校验保证。
  *
- * 顺序：role+name > getByLabel（表单控件，兜住 password 等无 textbox role 的情况）
+ * 顺序:role+name > getByLabel(表单控件,兜住 password 等无 textbox role 的情况)
  *      > placeholder > testid > role+全局序号。
  */
 export function candidateDescriptors(item: SnapshotItem): LocatorDescriptor[] {
@@ -52,8 +51,8 @@ export function jsLit(s: string): string {
 }
 
 /**
- * 把定位描述符渲染成 Playwright locator 表达式（默认基于 `page`）。
- * electron 形态下窗口对象也绑定为 `page`，故同一表达式两处通用。
+ * 把定位描述符渲染成 Playwright locator 表达式(默认基于 `page`)。
+ * electron 形态下窗口对象也绑定为 `page`,故同一表达式两处通用。
  */
 export function renderLocator(d: LocatorDescriptor, base = 'page'): string {
   let expr: string;
