@@ -284,6 +284,7 @@ function makeTools(ctx: ToolCtx): ToolSet {
           const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
           const r = await execShell(command, { stdinLines: stdin_lines, timeoutMs: ms, cwd: ctx.runDir });
           if (r.timedOut) return `命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
+          if (r.code === null) return `命令启动失败或被信号终止,未记录到用例。输出:\n${capOutput(r.output)}`;
           if (r.code !== 0) return `命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
           traj.add({ kind: 'runCommand', command, stdin: stdin_lines, timeoutMs: ms });
           return `命令成功(退出码 0),已记录到用例。输出:\n${capOutput(r.output)}`;

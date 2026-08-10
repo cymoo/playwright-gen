@@ -17,6 +17,9 @@ export interface ShellResult {
   timedOut: boolean;
 }
 
+/** 输出累积上限(字符):超过则保头保尾各半,内存有界。 */
+const OUT_CAP = 1_000_000;
+
 export function execShell(
   command: string,
   opts: { stdinLines?: string[]; timeoutMs: number; cwd?: string },
@@ -29,8 +32,13 @@ export function execShell(
       timedOut = true;
       child.kill('SIGKILL');
     }, opts.timeoutMs);
-    child.stdout.on('data', (d) => (out += d.toString()));
-    child.stderr.on('data', (d) => (out += d.toString()));
+    // 采集阶段就封顶(保头保尾),防止命令海量输出撑爆内存;模型侧另有 capOutput 截到 ~6KB
+    const push = (d: Buffer) => {
+      out += d.toString();
+      if (out.length > OUT_CAP) out = out.slice(0, OUT_CAP / 2) + out.slice(-OUT_CAP / 2);
+    };
+    child.stdout.on('data', push);
+    child.stderr.on('data', push);
     child.on('close', (code) => {
       clearTimeout(timer);
       resolve({ code, output: out, timedOut });
@@ -57,8 +65,9 @@ export const SHELL_HELPER_TS = `async function runCommand(cmd: string, stdinLine
     const child = spawn(cmd, { shell: true, cwd, env: process.env });
     let out = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); rej(new Error('命令超时 ' + timeoutMs + 'ms: ' + cmd)); }, timeoutMs);
-    child.stdout.on('data', (d) => (out += d));
-    child.stderr.on('data', (d) => (out += d));
+    const push = (d: Buffer) => { out += d; if (out.length > 1000000) out = out.slice(0, 500000) + out.slice(-500000); };
+    child.stdout.on('data', push);
+    child.stderr.on('data', push);
     child.on('error', (e) => { clearTimeout(timer); rej(e); });
     child.on('close', (code) => { clearTimeout(timer); console.log(out); res(code ?? -1); });
     if (stdinLines?.length) child.stdin.write(stdinLines.join('\\n') + '\\n');

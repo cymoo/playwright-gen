@@ -277,3 +277,12 @@ test('execShell: 超时 → SIGKILL 并标记 timedOut', async () => {
   const r = await execShell('node -e "setTimeout(()=>{},10000)"', { timeoutMs: 500 });
   expect(r.timedOut).toBe(true);
 });
+
+test('execShell: 海量输出在采集阶段封顶(内存有界,保头保尾)', async () => {
+  const r = await execShell(`node -e "const s='x'.repeat(65536); for (let i=0;i<50;i++) process.stdout.write(s); process.stdout.write('TAIL-MARK')"`, {
+    timeoutMs: 30_000,
+  });
+  expect(r.code).toBe(0);
+  expect(r.output.length).toBeLessThanOrEqual(1_100_000); // 上限 1MB + 单块余量
+  expect(r.output).toContain('TAIL-MARK'); // 尾部保留
+});
