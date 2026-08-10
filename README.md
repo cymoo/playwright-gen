@@ -58,6 +58,21 @@ npx tsx src/cli.ts --vision --url "file://$PWD/examples/02_visual_icons.html" \
 
 无步骤标注的描述则整段作为单一任务执行，行为不变。
 
+### 命令行与本地文件（混合 UI + 环境操作）
+
+步骤里可以要求执行 shell 命令或读写本地文件，与 UI 操作自由交错——典型场景：先用命令行操作设备，再回 UI 采集：
+
+```bash
+npx tsx src/cli.ts --url "http://localhost:8080" --description "\
+步骤1：执行 hdc shell，依次输入 cd vendor/bin、counters gather xxx、exit，预期命令成功。\
+步骤2：在页面上勾选对应配置，点击开始采集 trace，预期显示采集中。"
+```
+
+- `run_command`：一次性执行 shell 命令（POSIX 用 sh，Windows 用 cmd；需要 powershell 时写 `powershell -Command "…"`），支持给交互式 CLI（如 `hdc shell`）逐行输入 stdin；超时可设 1–600s。**退出码为 0 才记入用例**，回放时重跑同一命令并断言退出码为 0。
+- `write_file`：把文本保存到本地文件（自动建父目录），记入用例并在回放时重写。
+- `read_file`：读取文件内容供模型观察判断，不记入用例。
+- 相对路径统一相对本次 run 目录解析（生成的用例按 spec 所在目录解析，两边一致）；生成用例所需的 `node:` import 与辅助函数**按需注入**，纯 UI 用例产物不变。
+
 ### Electron 应用
 
 用 `--electron-bin` 指向**打包后的可执行文件**，其余与 web 相同——**Playwright 的 Electron 驱动跨平台**：macOS 传 `.app`（自动解析内部二进制），Windows 传 `.exe`，Linux 传可执行文件。引擎在应用窗口里用同一套 ARIA/ref 快照与忠实定位探索，生成的用例通过 `_electron.launch({ executablePath })` 启动应用回放。

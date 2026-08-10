@@ -18,7 +18,11 @@ export type LocatorDescriptor =
   | { kind: 'testId'; testId: string; nth?: number }
   | { kind: 'text'; text: string; exact?: boolean; nth?: number };
 
-/** 一条轨迹步骤(判别联合)。assertVisible 的 timeoutMs 用于 wait_for 的长等待。 */
+/**
+ * 一条轨迹步骤(判别联合)。assertVisible 的 timeoutMs 用于 wait_for 的长等待。
+ * runCommand / writeFile 是非页面步骤(无定位描述符,同 goto/assertUrl):
+ * 记录真正成功执行过的 shell 命令(含喂给 stdin 的行)与文件写入,回放时原样重放。
+ */
 export type Step =
   | { kind: 'stepStart'; title: string }
   | { kind: 'goto'; url: string }
@@ -32,7 +36,9 @@ export type Step =
   | { kind: 'assertVisible'; target: LocatorDescriptor; timeoutMs?: number }
   | { kind: 'assertText'; target: LocatorDescriptor; text: string }
   | { kind: 'assertUrl'; pattern: string }
-  | { kind: 'assertTitle'; pattern: string };
+  | { kind: 'assertTitle'; pattern: string }
+  | { kind: 'runCommand'; command: string; stdin?: string[]; timeoutMs: number }
+  | { kind: 'writeFile'; path: string; content: string };
 
 /** 生成用例要打开的目标:web 页面(goto url)或 electron 应用(启动可执行文件)。 */
 export type TargetSpec =
