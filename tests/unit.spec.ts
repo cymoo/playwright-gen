@@ -8,6 +8,7 @@ import { test, expect } from '@playwright/test';
 import { computeTimeout, renderTest } from '../src/codegen';
 import { splitSteps } from '../src/engine';
 import { candidateDescriptors, jsLit, renderLocator, type SnapshotItem } from '../src/locators';
+import { execShell } from '../src/shell';
 import { Trajectory } from '../src/trajectory';
 
 function item(p: Partial<SnapshotItem>): SnapshotItem {
@@ -186,4 +187,93 @@ test('computeTimeout: 计入动作数与长等待预算', () => {
   expect(computeTimeout(t)).toBe(30_000 + 3_000 + 120_000);
   const generated = renderTest(t, { testName: 'x', description: 'd', target: { mode: 'web', url: 'u' } });
   expect(generated).toContain(`test.setTimeout(${30_000 + 3_000 + 120_000});`);
+});
+
+// ---------- runCommand / writeFile codegen ----------
+
+test('renderTest: runCommand 步骤 → 注入 child_process import 与 runCommand 辅助函数', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'goto', url: 'https://x.test/' });
+  t.add({
+    kind: 'runCommand',
+    command: 'hdc shell',
+    stdin: ['cd vendor/bin', 'counters gather xxx', 'exit'],
+    timeoutMs: 120_000,
+  });
+  const code = renderTest(t, { testName: 'cmd', description: 'd', target: { mode: 'web', url: 'https://x.test/' } });
+  expect(code).toContain(`import { spawn } from 'node:child_process';`);
+  expect(code).toContain(`import { dirname } from 'node:path';`);
+  expect(code).toContain('async function runCommand(');
+  expect(code).toContain(
+    `expect(await runCommand('hdc shell', ['cd vendor/bin', 'counters gather xxx', 'exit'], 120000)).toBe(0);`,
+  );
+});
+
+test('renderTest: runCommand 无 stdin → 传 undefined;writeFile → 注入 fs/path import 与内容转义', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'runCommand', command: 'echo hello', timeoutMs: 60_000 });
+  t.add({ kind: 'writeFile', path: 'out/trace.cfg', content: 'line1\nline2' });
+  const code = renderTest(t, { testName: 'wf', description: 'd', target: { mode: 'web', url: 'u' } });
+  expect(code).toContain(`expect(await runCommand('echo hello', undefined, 60000)).toBe(0);`);
+  expect(code).toContain(`import { mkdirSync, writeFileSync } from 'node:fs';`);
+  expect(code).toContain(`import { dirname, resolve } from 'node:path';`);
+  expect(code).toContain('function writeFileTo(');
+  expect(code).toContain(`writeFileTo('out/trace.cfg', 'line1\\nline2');`);
+});
+
+test('renderTest: 纯 UI 轨迹不注入 node: import 与辅助函数(产物与从前一致)', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'goto', url: 'u' });
+  t.add({ kind: 'click', target: { kind: 'text', text: 'a' } });
+  const code = renderTest(t, { testName: 'ui', description: 'd', target: { mode: 'web', url: 'u' } });
+  expect(code).not.toContain('node:child_process');
+  expect(code).not.toContain('node:fs');
+  expect(code).not.toContain('runCommand(');
+  expect(code).not.toContain('writeFileTo(');
+});
+
+test('renderTest: electron 形态 + runCommand → 辅助函数与 _electron 共存', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'runCommand', command: 'echo ok', timeoutMs: 60_000 });
+  t.add({ kind: 'click', target: { kind: 'role', role: 'button', name: 'Start' } });
+  const code = renderTest(t, {
+    testName: 'app',
+    description: 'd',
+    target: { mode: 'electron', bin: '/apps/my', args: [] },
+  });
+  expect(code).toContain('_electron as electron');
+  expect(code).toContain(`import { spawn } from 'node:child_process';`);
+  expect(code).toContain('async function runCommand(');
+  expect(code).toContain(`expect(await runCommand('echo ok', undefined, 60000)).toBe(0);`);
+});
+
+test('computeTimeout: 计入 runCommand 的完整超时预算', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'runCommand', command: 'sleep 1', timeoutMs: 120_000 });
+  t.add({ kind: 'click', target: { kind: 'text', text: 'a' } });
+  // 30s 基础 + 2 个动作×1s + 120s 命令预算
+  expect(computeTimeout(t)).toBe(30_000 + 2_000 + 120_000);
+});
+
+// ---------- execShell(真实 spawn,node 命令跨平台) ----------
+
+test('execShell: 返回真实退出码', async () => {
+  const r = await execShell('node -e "process.exit(3)"', { timeoutMs: 30_000 });
+  expect(r.timedOut).toBe(false);
+  expect(r.code).toBe(3);
+});
+
+test('execShell: stdin_lines 逐行写入并 end(交互式 CLI 输入)', async () => {
+  const r = await execShell('node -e "process.stdin.pipe(process.stdout)"', {
+    stdinLines: ['hello', 'world'],
+    timeoutMs: 30_000,
+  });
+  expect(r.code).toBe(0);
+  expect(r.output).toContain('hello');
+  expect(r.output).toContain('world');
+});
+
+test('execShell: 超时 → SIGKILL 并标记 timedOut', async () => {
+  const r = await execShell('node -e "setTimeout(()=>{},10000)"', { timeoutMs: 500 });
+  expect(r.timedOut).toBe(true);
 });

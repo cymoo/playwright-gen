@@ -12,8 +12,8 @@
  * 失败则带失败信息重新探索(verify → repair)。
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
@@ -22,6 +22,7 @@ import { Session } from './browser';
 import { computeTimeout, renderTest } from './codegen';
 import { deepseekModel, envMaxSteps } from './models';
 import { runPlaywright } from './runner';
+import { capOutput, execShell } from './shell';
 import { Trajectory, type TargetSpec } from './trajectory';
 import { describeScreenshot } from './vision';
 
@@ -81,7 +82,8 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 - 若提示"未找到 / 匹配多个 / 无法唯一定位",先 get_page_state 看最新 ref,再改用具体 ref 或更精确的名称。
 - 下拉选择用 select_option;若它不适用(自定义下拉),点击展开后再点击选项。
 - 操作失败会返回失败原因,依据它调整策略:换更精确的目标、先 wait_for 等待、或改用其他操作。
-- 禁止任何形式的硬等待/轮询;需要等待就用 wait_for(它会连同超时记入用例)。`;
+- 禁止任何形式的硬等待/轮询;需要等待就用 wait_for(它会连同超时记入用例)。
+- 本地环境工具:run_command 执行 shell 命令(交互式 CLI 用 stdin_lines 逐行输入,如 hdc shell);write_file 写入本地文件;read_file 读取文件内容用于观察(不记入用例)。run_command 与 write_file 成功后会记入用例并在回放时原样重放。仅在步骤明确要求命令行/文件操作时使用,UI 上能完成的操作必须在 UI 上做。`;
 
 // ---------- 工具 ----------
 
@@ -265,6 +267,51 @@ function makeTools(ctx: ToolCtx): ToolSet {
         }),
     }),
 
+    run_command: tool({
+      description:
+        '执行一条 shell 命令并等待其结束,返回输出与退出码(darwin/linux 用 sh,Windows 用 cmd;需要 powershell 时命令写 powershell -Command "…")。' +
+        'stdin_lines 用于给交互式 CLI 逐行输入,如 run_command("hdc shell", stdin_lines=["cd vendor/bin","counters gather xxx","exit"]);' +
+        '若交互输入无效,改用单条命令形式,如 hdc shell "cd vendor/bin && counters gather xxx"。' +
+        '退出码为 0 才记入用例,回放时会重跑该命令并断言退出码为 0;预期非 0 的命令请写成 cmd || true。' +
+        'timeout_seconds 默认 60、最长 600。仅在步骤明确要求命令行操作时使用,UI 能完成的操作不要用命令代替。',
+      inputSchema: z.object({
+        command: z.string(),
+        stdin_lines: z.array(z.string()).optional(),
+        timeout_seconds: z.number().optional(),
+      }),
+      execute: async ({ command, stdin_lines, timeout_seconds }) =>
+        guard(async () => {
+          const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
+          const r = await execShell(command, { stdinLines: stdin_lines, timeoutMs: ms, cwd: ctx.runDir });
+          if (r.timedOut) return `命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
+          if (r.code !== 0) return `命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
+          traj.add({ kind: 'runCommand', command, stdin: stdin_lines, timeoutMs: ms });
+          return `命令成功(退出码 0),已记录到用例。输出:\n${capOutput(r.output)}`;
+        }),
+    }),
+
+    write_file: tool({
+      description:
+        '把文本内容写入本地文件(UTF-8,自动创建父目录)。会记入用例并在回放时重写同一文件。相对路径相对本次运行目录解析,跨目录请用绝对路径。',
+      inputSchema: z.object({ path: z.string(), content: z.string() }),
+      execute: async ({ path, content }) =>
+        guard(async () => {
+          const abs = resolve(ctx.runDir, path);
+          mkdirSync(dirname(abs), { recursive: true });
+          writeFileSync(abs, content, 'utf-8');
+          traj.add({ kind: 'writeFile', path, content });
+          return `已写入文件:${path}(${Buffer.byteLength(content, 'utf-8')} 字节),已记录到用例。`;
+        }),
+    }),
+
+    read_file: tool({
+      description:
+        '读取本地文件内容用于观察判断(UTF-8,超长会截断中间)。只用于观察,不记入用例。相对路径相对本次运行目录解析。',
+      inputSchema: z.object({ path: z.string() }),
+      execute: async ({ path }) =>
+        guard(async () => capOutput(readFileSync(resolve(ctx.runDir, path), 'utf-8'))),
+    }),
+
     step_done: tool({
       description: '当前步骤的全部要求(含预期结果的断言)都完成后调用,给出一句执行摘要。成功后停止,不要再调用任何工具。',
       inputSchema: z.object({ summary: z.string() }),
@@ -273,10 +320,11 @@ function makeTools(ctx: ToolCtx): ToolSet {
         if (delta.length === 0) {
           return '还没有执行任何操作或断言,不能结束该步骤。请先按步骤描述实际操作页面。';
         }
-        const hasAssert = delta.some((s) => s.kind.startsWith('assert'));
+        // runCommand 也算验证:回放时会重跑命令并断言退出码 0,是命令类步骤唯一可回放的验证
+        const hasAssert = delta.some((s) => s.kind.startsWith('assert') || s.kind === 'runCommand');
         if (ctx.needsAssert && !hasAssert && ctx.flag.rejects < 2) {
           ctx.flag.rejects += 1;
-          return '该步骤描述了预期结果,但尚未做任何断言。请先用 assert_visible / assert_text / wait_for 验证预期,再调用 step_done。';
+          return '该步骤描述了预期结果,但尚未做任何断言。请先用 assert_visible / assert_text / wait_for 验证预期(命令执行类预期由成功的 run_command 覆盖),再调用 step_done。';
         }
         ctx.flag.done = true;
         ctx.flag.summary = summary;

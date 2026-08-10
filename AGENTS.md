@@ -15,6 +15,7 @@
 | `trajectory.ts` | 结构化轨迹：`LocatorDescriptor` / `Step`（含 `stepStart` 分组标记、assertVisible 的 `timeoutMs`）/ `TargetSpec` |
 | `locators.ts` | `candidateDescriptors`（推导有序候选）+ `renderLocator`（渲染）；纯函数、可单测 |
 | `codegen.ts` | 轨迹 → 代码：web/electron 两形态、`test.step()` 分块、`computeTimeout` 按轨迹算 `test.setTimeout` |
+| `shell.ts` | `execShell`：一次性 shell 命令执行器（`shell: true`，stdin 逐行输入）+ 生成用例里的孪生辅助函数源码（`SHELL_HELPER_TS`/`WRITE_HELPER_TS`，同文件放置防漂移） |
 | `runner.ts` | `runPlaywright`：`playwright test` 裁判（每 run 目录自带极简 config，testDir `.`；Windows 经 shell 调 npx.cmd） |
 | `models.ts` | deepseek / qwen：`createOpenAICompatible` + env；`envMaxSteps` |
 | `vision.ts` | `describeScreenshot`：Qwen 看图返回文本（file part） |
@@ -29,6 +30,7 @@
 - **工具异常全部转文字**：定位失败/超时等都以"操作失败：…"回给模型自纠，不中断对话。
 - **Agent 层 = Vercel AI SDK**：`generateText` + tools + `stopWhen: [stepCountIs(N), () => flag.done]`（注意 AI SDK v7 默认 `stopWhen` 是 1 步，做工具循环必须显式设置；完成标志用闭包而非 `hasToolCall`，因为 `step_done` 可能被引擎驳回）。
 - **无 navigate 工具 / 无固定 sleep**：入口 URL/应用由引擎打开，站内导航靠点击;等待用 `wait_for`，不 sleep。
+- **本地环境工具（命令行 + 文件）**：`run_command` 一次性执行 shell 命令（POSIX sh / Windows cmd，`stdin_lines` 给交互式 CLI 逐行输入，如 `hdc shell` → cd → counters gather → exit；超时 clamp 1–600s）；退出码 0 才记入轨迹，回放时重跑并 `expect(...).toBe(0)`——命令类步骤的可回放验证，`step_done` 断言门也认它。`write_file` 记入轨迹并回放；`read_file` 仅观察不记录。相对路径统一相对 run 目录（生成用例里用 `dirname(test.info().file)` 解析，与探索一致）；`node:` import 与辅助函数按需注入，纯 UI 用例产物不变。无持久后台会话（按需求明确降范围）。
 
 ## 运行与验证
 
