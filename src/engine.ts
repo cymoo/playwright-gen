@@ -12,8 +12,8 @@
  * 失败则带失败信息重新探索(verify → repair)。
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
@@ -58,9 +58,13 @@ export function splitSteps(description: string): Plan {
   return { preamble: description.slice(0, marks[0].index).trim(), steps };
 }
 
-/** 步骤描述是否含"预期结果"——含则 step_done 前必须有断言。 */
+/**
+ * 步骤描述是否含"预期结果"——含则 step_done 前必须有断言。
+ * 保存/导出/下载类字样也算:产出文件的步骤必须有可回放的验证(click_and_save /
+ * run_command),否则"点了按钮但文件没落盘"会静默通过。
+ */
 const EXPECTATION_RE =
-  /预期|期望|应该|应当|出现|显示|可见|看到|包含|变为|变成|expect|should|appear|visible|verif|assert/i;
+  /预期|期望|应该|应当|出现|显示|可见|看到|包含|变为|变成|保存|导出|下载|expect|should|appear|visible|verif|assert|save|export|download/i;
 
 // ---------- Agent 指令 ----------
 
@@ -69,7 +73,7 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 
 工作循环:
 1. 观察:操作类工具的返回里附带最新页面状态(可交互元素 ref 列表 + ARIA 树);需要时可调 get_page_state 重新观察。
-2. 操作:click / fill / check / uncheck / select_option / hover / press_key / scroll。优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))。
+2. 操作:click / click_and_save / fill / check / uncheck / select_option / hover / press_key / scroll。优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))。
 3. 等待:录制、加载、跳转等**耗时过程**,用 wait_for("<预期出现的文本>", timeout_seconds) 等待其完成,给足时间(如录制场景 120~300 秒)——不要反复 get_page_state 轮询,不要臆测已完成。
 4. 断言:用 assert_visible / assert_text / assert_url / assert_title 验证该步骤的预期结果;wait_for 等到目标也会作为断言记入用例。**这是测试的价值,不要只操作不断言**。
 5. 该步骤全部完成且预期已断言后,调用 step_done(summary) 并停止。
@@ -79,6 +83,7 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 - 一次只做一个动作,依据返回的真实状态推进,不要臆测看不到的元素。
 - 优先用 click 直接点击可见目标(按钮、标签、链接)。除非确实没有可点元素,否则不要用 press_key 的 Tab/Enter 做导航或激活——那样生成的用例很脆弱。
 - 开关/复选框:打开用 check,关闭用 uncheck(元素列表里标注了 [已选中]/[未选中]);若 check/uncheck 报不支持,改用 click 切换。
+- **保存/导出/下载文件的按钮用 click_and_save**(指定保存文件名),不要用 click:下载产物和操作系统的原生保存对话框都不在页面里,普通 click 拿不到文件;click_and_save 会自动接住下载/原生对话框并把文件落到指定路径,文件真实生成才算成功——它同时就是该步骤"文件已保存"的验证。不要尝试与原生保存对话框交互。
 - 若提示"未找到 / 匹配多个 / 无法唯一定位",先 get_page_state 看最新 ref,再改用具体 ref 或更精确的名称。
 - 下拉选择用 select_option;若它不适用(自定义下拉),点击展开后再点击选项。
 - 操作失败会返回失败原因,依据它调整策略:换更精确的目标、先 wait_for 等待、或改用其他操作。
@@ -132,6 +137,32 @@ function makeTools(ctx: ToolCtx): ToolSet {
           const d = await session.click(target);
           traj.add({ kind: 'click', target: d });
           return withState(`已点击:${target}`);
+        }),
+    }),
+
+    click_and_save: tool({
+      description:
+        '点击会触发"保存文件/下载"的元素(保存/导出/下载类按钮)并把产物保存为 save_as(文件名或相对路径,必须位于本次运行目录内;要求"保存在当前路径"就直接写文件名)。' +
+        '自动接住下载事件与 Electron 原生保存对话框——原生对话框不在页面里,你看不到也点不到,所以这类点击必须用本工具而不是 click。' +
+        '若目标文件已存在会先删除,文件真实落盘才算成功并记入用例,回放时重演点击并断言文件生成。timeout_seconds 默认 60、最长 600。',
+      inputSchema: z.object({
+        target: z.string(),
+        save_as: z.string(),
+        timeout_seconds: z.number().optional(),
+      }),
+      execute: async ({ target, save_as, timeout_seconds }) =>
+        guard(async () => {
+          const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
+          // 会先删目标文件,故必须限制在 run 目录内,拒绝绝对路径/越界的 ..
+          const abs = resolve(ctx.runDir, save_as);
+          const rel = relative(resolve(ctx.runDir), abs);
+          if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+            return `save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
+          }
+          const d = await session.clickAndSave(target, abs, ms);
+          const size = statSync(abs).size; // 先取 size 再记录,避免"已记录却报失败"的不一致
+          traj.add({ kind: 'clickSave', target: d, path: save_as, timeoutMs: ms });
+          return withState(`已点击并保存文件:${save_as}(${size} 字节),已记录到用例。`);
         }),
     }),
 
@@ -321,11 +352,13 @@ function makeTools(ctx: ToolCtx): ToolSet {
         if (delta.length === 0) {
           return '还没有执行任何操作或断言,不能结束该步骤。请先按步骤描述实际操作页面。';
         }
-        // runCommand 也算验证:回放时会重跑命令并断言退出码 0,是命令类步骤唯一可回放的验证
-        const hasAssert = delta.some((s) => s.kind.startsWith('assert') || s.kind === 'runCommand');
+        // runCommand / clickSave 也算验证:回放时会重演并断言(命令退出码 0 / 文件真实落盘)
+        const hasAssert = delta.some(
+          (s) => s.kind.startsWith('assert') || s.kind === 'runCommand' || s.kind === 'clickSave',
+        );
         if (ctx.needsAssert && !hasAssert && ctx.flag.rejects < 2) {
           ctx.flag.rejects += 1;
-          return '该步骤描述了预期结果,但尚未做任何断言。请先用 assert_visible / assert_text / wait_for 验证预期(命令执行类预期由成功的 run_command 覆盖),再调用 step_done。';
+          return '该步骤描述了预期结果,但尚未做任何断言。请先用 assert_visible / assert_text / wait_for 验证预期(命令执行由成功的 run_command 覆盖,文件保存由 click_and_save 覆盖),再调用 step_done。';
         }
         ctx.flag.done = true;
         ctx.flag.summary = summary;

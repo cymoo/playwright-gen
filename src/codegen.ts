@@ -9,11 +9,12 @@
  * 多步骤描述生成**一个用例文件**:stepStart 标记把动作分进 test.step() 块。
  * 稳健性内建:web-first 断言 + 自动等待,绝不输出硬 sleep;长等待用带 timeout 的
  * toBeVisible;test.setTimeout 按轨迹(动作数 + 各断言超时 + 命令超时)自动计算。
- * runCommand / writeFile 步骤所需的 node: import 与辅助函数按需注入(见 shell.ts),
- * 纯 UI 轨迹的产物与不含此能力时完全一致。
+ * runCommand / writeFile / clickSave 步骤所需的 node: import 与辅助函数按需注入
+ * (见 shell.ts / browser.ts),纯 UI 轨迹的产物与不含此能力时完全一致。
  */
 
 import type { Step, TargetSpec, Trajectory } from './trajectory';
+import { SAVE_HELPER_TS } from './browser';
 import { jsLit, renderLocator } from './locators';
 import { SHELL_HELPER_TS, WRITE_HELPER_TS } from './shell';
 
@@ -21,12 +22,16 @@ type ActionStep = Exclude<Step, { kind: 'stepStart' }>;
 
 const DEFAULT_ASSERT_MS = 5_000;
 
-function renderStep(s: ActionStep): string {
+function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
   switch (s.kind) {
     case 'goto':
       return `await page.goto(${jsLit(s.url)});`;
     case 'click':
       return `await ${renderLocator(s.target)}.click();`;
+    case 'clickSave': {
+      const app = mode === 'electron' ? 'electronApp' : 'undefined';
+      return `await clickAndSave(page, ${app}, ${renderLocator(s.target)}, ${jsLit(s.path)}, ${s.timeoutMs});`;
+    }
     case 'fill':
       return `await ${renderLocator(s.target)}.fill(${jsLit(s.value)});`;
     case 'check':
@@ -67,7 +72,7 @@ function renderStep(s: ActionStep): string {
 /**
  * 按轨迹计算用例超时:基础 30s + 每个动作 1s + 各断言的完整超时预算
  * (wait_for 的长等待在回放时会真实发生,如等录制结束,必须计入)+
- * 各 runCommand 的完整超时预算(命令回放时同样真实执行)。上限 15 分钟。
+ * 各 runCommand / clickSave 的完整超时预算(命令与文件保存回放时同样真实发生)。上限 15 分钟。
  */
 export function computeTimeout(traj: Trajectory): number {
   let ms = 30_000;
@@ -76,7 +81,7 @@ export function computeTimeout(traj: Trajectory): number {
     ms += 1_000;
     if (s.kind === 'assertVisible') ms += s.timeoutMs ?? DEFAULT_ASSERT_MS;
     else if (s.kind.startsWith('assert')) ms += DEFAULT_ASSERT_MS;
-    else if (s.kind === 'runCommand') ms += s.timeoutMs;
+    else if (s.kind === 'runCommand' || s.kind === 'clickSave') ms += s.timeoutMs;
   }
   return Math.min(ms, 900_000);
 }
@@ -101,16 +106,16 @@ function groupByStep(steps: Step[]): Group[] {
   return groups;
 }
 
-function renderGroups(groups: Group[], pad: string): string {
+function renderGroups(groups: Group[], pad: string, mode: TargetSpec['mode']): string {
   if (groups.length === 0) return `${pad}// (无步骤)`;
   const lines: string[] = [];
   for (const g of groups) {
     if (g.title === undefined) {
-      for (const s of g.steps) lines.push(pad + renderStep(s));
+      for (const s of g.steps) lines.push(pad + renderStep(s, mode));
     } else {
       lines.push(`${pad}await test.step(${jsLit(g.title)}, async () => {`);
       if (g.steps.length === 0) lines.push(`${pad}  // (该步骤未记录到操作)`);
-      for (const s of g.steps) lines.push(`${pad}  ${renderStep(s)}`);
+      for (const s of g.steps) lines.push(`${pad}  ${renderStep(s, mode)}`);
       lines.push(`${pad}});`);
     }
   }
@@ -126,17 +131,27 @@ function docComment(description: string): string {
   return lines.join('\n') + '\n';
 }
 
-/** runCommand / writeFile 步骤所需的 node: import 与辅助函数,仅在轨迹用到时注入。 */
+/** runCommand / writeFile / clickSave 步骤所需的 node: import 与辅助函数,仅在轨迹用到时注入。 */
 function nodeHelpers(traj: Trajectory): { imports: string; helpers: string } {
   const hasCmd = traj.steps.some((s) => s.kind === 'runCommand');
   const hasWrite = traj.steps.some((s) => s.kind === 'writeFile');
+  const hasSave = traj.steps.some((s) => s.kind === 'clickSave');
   const imports: string[] = [];
   const helpers: string[] = [];
   if (hasCmd) imports.push(`import { spawn } from 'node:child_process';`);
-  if (hasWrite) imports.push(`import { mkdirSync, writeFileSync } from 'node:fs';`);
-  if (hasCmd || hasWrite) imports.push(`import { dirname${hasWrite ? ', resolve' : ''} } from 'node:path';`);
+  const fsNames = [
+    hasSave && 'existsSync',
+    (hasWrite || hasSave) && 'mkdirSync',
+    hasSave && 'rmSync',
+    hasWrite && 'writeFileSync',
+  ].filter((n): n is string => !!n);
+  if (fsNames.length) imports.push(`import { ${fsNames.join(', ')} } from 'node:fs';`);
+  if (hasCmd || hasWrite || hasSave) {
+    imports.push(`import { dirname${hasWrite || hasSave ? ', resolve' : ''} } from 'node:path';`);
+  }
   if (hasCmd) helpers.push(SHELL_HELPER_TS);
   if (hasWrite) helpers.push(WRITE_HELPER_TS);
+  if (hasSave) helpers.push(SAVE_HELPER_TS);
   return {
     imports: imports.length ? imports.join('\n') + '\n' : '',
     helpers: helpers.length ? helpers.join('\n\n') + '\n\n' : '',
@@ -169,7 +184,7 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
       `  const electronApp = await electron.launch({ executablePath: ${jsLit(target.bin)}, args: ${argsLit} });\n` +
       `  try {\n` +
       `    const page = await electronApp.firstWindow();\n` +
-      `${renderGroups(groups, '    ')}\n` +
+      `${renderGroups(groups, '    ', 'electron')}\n` +
       `  } finally {\n` +
       `    await electronApp.close();\n` +
       `  }\n` +
@@ -185,7 +200,7 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
     docComment(description) +
     `test(${title}, async ({ page }) => {\n` +
     `  test.setTimeout(${timeout});\n` +
-    `${renderGroups(groups, '  ')}\n` +
+    `${renderGroups(groups, '  ', 'web')}\n` +
     `});\n`
   );
 }
