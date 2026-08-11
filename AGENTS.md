@@ -31,6 +31,7 @@
 - **Agent 层 = Vercel AI SDK**：`generateText` + tools + `stopWhen: [stepCountIs(N), () => flag.done]`（注意 AI SDK v7 默认 `stopWhen` 是 1 步，做工具循环必须显式设置；完成标志用闭包而非 `hasToolCall`，因为 `step_done` 可能被引擎驳回）。
 - **无 navigate 工具 / 无固定 sleep**：入口 URL/应用由引擎打开，站内导航靠点击;等待用 `wait_for`，不 sleep。
 - **本地环境工具（命令行 + 文件）**：`run_command` 一次性执行 shell 命令（POSIX sh / Windows cmd，`stdin_lines` 给交互式 CLI 逐行输入，如 `hdc shell` → cd → counters gather → exit；超时 clamp 1–600s）；退出码 0 才记入轨迹，回放时重跑并 `expect(...).toBe(0)`——命令类步骤的可回放验证，`step_done` 断言门也认它。`write_file` 记入轨迹并回放；`read_file` 仅观察不记录。相对路径统一相对 run 目录（生成用例里用 `dirname(test.info().file)` 解析，与探索一致）；`node:` import 与辅助函数按需注入，纯 UI 用例产物不变。无持久后台会话（按需求明确降范围）。
+- **文件保存（下载 + Electron 原生对话框）**：`click_and_save(target, save_as)` 点击"保存/导出/下载"类按钮：web 接 download 事件 `saveAs`（不接则 Playwright 把下载收进临时目录、context 关闭即删）；Electron 先 `electronApp.evaluate` stub `dialog.showSaveDialog(Sync)` 返回目标路径（原生对话框不在 DOM，看不见也点不到），应用直写盘则轮询文件出现。先删同名旧文件防误判（探索重试与重复回放都靠这个保证"文件存在 = 本次点击的产物"）；文件落盘才记 `clickSave` 轨迹，回放辅助函数 `SAVE_HELPER_TS` 与执行器同在 `browser.ts`（孪生不漂移）。`EXPECTATION_RE` 含"保存/导出/下载"→ 此类步骤强制有验证，`step_done` 断言门也认 `clickSave`。
 
 ## 运行与验证
 

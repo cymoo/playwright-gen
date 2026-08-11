@@ -20,12 +20,13 @@ import {
   expect,
   type Browser,
   type BrowserContext,
+  type Download,
   type ElectronApplication,
   type Locator,
   type Page,
 } from '@playwright/test';
-import { existsSync, readdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 import type { LocatorDescriptor, TargetSpec } from './trajectory';
 import { candidateDescriptors, type SnapshotItem } from './locators';
@@ -321,6 +322,48 @@ export class Session {
     return descriptor;
   }
 
+  /**
+   * 点击触发"保存文件/下载"的元素,并确保产物落到 savePath(绝对路径):
+   * - web:接住 download 事件后 saveAs 到目标路径。不接的话 Playwright 会把下载收进
+   *   临时目录并在 context 关闭时删除——文件永远不会出现在期望的路径;
+   * - electron:先在主进程 stub dialog.showSaveDialog(Sync) 直接返回目标路径——原生
+   *   保存对话框不在 DOM 里,Playwright 看不见也点不到,stub 是唯一可自动化的方式;
+   *   应用自行写盘的场景靠轮询等文件出现。
+   * 先删除已存在的目标文件,保证"文件存在"确实是本次点击的产物(重试/回放不误判)。
+   */
+  async clickAndSave(target: string, savePath: string, timeoutMs: number): Promise<LocatorDescriptor> {
+    const { locator, descriptor } = await this.resolve(target);
+    mkdirSync(dirname(savePath), { recursive: true });
+    rmSync(savePath, { force: true });
+    if (this.electronApp) {
+      await this.electronApp.evaluate(({ dialog }, p) => {
+        dialog.showSaveDialog = async () => ({ canceled: false, filePath: p });
+        dialog.showSaveDialogSync = () => p;
+      }, savePath);
+    }
+    let download: Download | undefined;
+    this.page.waitForEvent('download', { timeout: timeoutMs }).then(
+      (d) => (download = d),
+      () => {},
+    );
+    await locator.click({ timeout: ACTION_TIMEOUT });
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (download) {
+        await download.saveAs(savePath);
+        return descriptor;
+      }
+      if (existsSync(savePath)) return descriptor;
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `点击后 ${Math.round(timeoutMs / 1000)}s 内未捕获到下载事件,目标文件也未出现:${savePath}。` +
+            `可能:该元素不触发保存;导出前还有未完成的选择;或应用把文件写去了别处。`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+
   async fill(target: string, text: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
     await locator.fill(text, { timeout: ACTION_TIMEOUT });
@@ -411,3 +454,31 @@ export class Session {
     return path;
   }
 }
+
+/**
+ * 生成用例里的 clickAndSave 辅助函数:与 Session.clickAndSave 同语义(下载事件 +
+ * Electron 对话框 stub + 轮询文件 + 先删旧文件),同文件放置保证探索/回放不漂移。
+ * 相对路径按 spec 所在目录解析,与 run_command / write_file 一致。web 形态 electronApp 传 undefined。
+ */
+export const SAVE_HELPER_TS = `async function clickAndSave(page: any, electronApp: any, locator: any, p: string, timeoutMs: number): Promise<void> {
+  const abs = resolve(dirname(test.info().file), p);
+  mkdirSync(dirname(abs), { recursive: true });
+  rmSync(abs, { force: true });
+  if (electronApp) {
+    await electronApp.evaluate(({ dialog }: any, fp: string) => {
+      dialog.showSaveDialog = async () => ({ canceled: false, filePath: fp });
+      dialog.showSaveDialogSync = () => fp;
+    }, abs);
+  }
+  let download: any;
+  page.waitForEvent('download', { timeout: timeoutMs }).then((d: any) => (download = d), () => {});
+  await locator.click();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (download) { await download.saveAs(abs); break; }
+    if (existsSync(abs)) break;
+    if (Date.now() >= deadline) throw new Error('保存超时 ' + timeoutMs + 'ms:未捕获下载事件,文件也未出现:' + abs);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  expect(existsSync(abs)).toBe(true);
+}`;

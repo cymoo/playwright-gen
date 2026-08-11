@@ -230,6 +230,66 @@ test('renderTest: 纯 UI 轨迹不注入 node: import 与辅助函数(产物与�
   expect(code).not.toContain('node:fs');
   expect(code).not.toContain('runCommand(');
   expect(code).not.toContain('writeFileTo(');
+  expect(code).not.toContain('clickAndSave(');
+});
+
+// ---------- clickSave(click_and_save)codegen ----------
+
+test('renderTest: clickSave web 形态 → 注入 fs/path import 与 clickAndSave 辅助函数,electronApp 传 undefined', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'goto', url: 'https://x.test/' });
+  t.add({
+    kind: 'clickSave',
+    target: { kind: 'role', role: 'button', name: '保存' },
+    path: 'GPU_Counters_Data.csv',
+    timeoutMs: 60_000,
+  });
+  const code = renderTest(t, { testName: 'sv', description: 'd', target: { mode: 'web', url: 'https://x.test/' } });
+  expect(code).toContain(`import { existsSync, mkdirSync, rmSync } from 'node:fs';`);
+  expect(code).toContain(`import { dirname, resolve } from 'node:path';`);
+  expect(code).toContain('async function clickAndSave(');
+  expect(code).toContain(
+    `await clickAndSave(page, undefined, page.getByRole('button', { name: '保存' }), 'GPU_Counters_Data.csv', 60000);`,
+  );
+});
+
+test('renderTest: clickSave electron 形态 → 传 electronApp(回放时 stub 原生保存对话框)', () => {
+  const t = new Trajectory();
+  t.add({
+    kind: 'clickSave',
+    target: { kind: 'role', role: 'button', name: 'Save' },
+    path: 'out.csv',
+    timeoutMs: 120_000,
+  });
+  const code = renderTest(t, {
+    testName: 'app',
+    description: 'd',
+    target: { mode: 'electron', bin: '/apps/my', args: [] },
+  });
+  expect(code).toContain('_electron as electron');
+  expect(code).toContain(
+    `await clickAndSave(page, electronApp, page.getByRole('button', { name: 'Save' }), 'out.csv', 120000);`,
+  );
+  expect(code).toContain('dialog.showSaveDialog');
+});
+
+test('renderTest: clickSave 与 writeFile 共存 → fs import 合并去重', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'writeFile', path: 'a.txt', content: 'x' });
+  t.add({ kind: 'clickSave', target: { kind: 'text', text: '保存' }, path: 'b.csv', timeoutMs: 60_000 });
+  const code = renderTest(t, { testName: 'mix', description: 'd', target: { mode: 'web', url: 'u' } });
+  expect(code).toContain(`import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';`);
+  expect(code).toContain(`import { dirname, resolve } from 'node:path';`);
+  expect(code).toContain('function writeFileTo(');
+  expect(code).toContain('async function clickAndSave(');
+});
+
+test('computeTimeout: 计入 clickSave 的完整超时预算', () => {
+  const t = new Trajectory();
+  t.add({ kind: 'clickSave', target: { kind: 'text', text: '保存' }, path: 'b.csv', timeoutMs: 90_000 });
+  t.add({ kind: 'click', target: { kind: 'text', text: 'a' } });
+  // 30s 基础 + 2 个动作×1s + 90s 保存预算
+  expect(computeTimeout(t)).toBe(30_000 + 2_000 + 90_000);
 });
 
 test('renderTest: electron 形态 + runCommand → 辅助函数与 _electron 共存', () => {
