@@ -80,7 +80,7 @@ npx tsx src/cli.ts --url "http://localhost:8080" --description "\
 - **web**：接住 Playwright 的 download 事件并 `saveAs` 到指定文件——不接的话下载只会进临时目录，随浏览器上下文关闭被删除，文件永远不会出现在期望路径；
 - **Electron**：自动在主进程 stub `dialog.showSaveDialog(Sync)` 直接返回目标路径——原生保存对话框不在 DOM 里，Playwright 看不见也点不到，stub 是唯一可自动化的方式；应用自行写盘的场景轮询等文件出现；
 - 文件**真实落盘才记入用例**（同名旧文件先删除，防止上次残留被误判为保存成功）；回放时重演点击并断言文件生成；
-- 保存路径相对本次 run 目录解析（生成用例按 spec 所在目录），与 `run_command` / `write_file` 一致；
+- 保存路径相对本次 run 目录解析（生成用例按 spec 所在目录），且**必须位于 run 目录内**（会先删同名文件，绝对路径/越界 `..` 一律拒绝）；
 - 步骤文案含"保存/导出/下载"时，引擎强制该步骤有可回放的验证——成功的 `click_and_save` 本身就是验证。
 
 ### Electron 应用

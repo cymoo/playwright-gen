@@ -13,7 +13,7 @@
  */
 
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
@@ -142,7 +142,7 @@ function makeTools(ctx: ToolCtx): ToolSet {
 
     click_and_save: tool({
       description:
-        '点击会触发"保存文件/下载"的元素(保存/导出/下载类按钮)并把产物保存为 save_as(文件名或相对路径,相对本次运行目录;要求"保存在当前路径"就直接写文件名)。' +
+        '点击会触发"保存文件/下载"的元素(保存/导出/下载类按钮)并把产物保存为 save_as(文件名或相对路径,必须位于本次运行目录内;要求"保存在当前路径"就直接写文件名)。' +
         '自动接住下载事件与 Electron 原生保存对话框——原生对话框不在页面里,你看不到也点不到,所以这类点击必须用本工具而不是 click。' +
         '若目标文件已存在会先删除,文件真实落盘才算成功并记入用例,回放时重演点击并断言文件生成。timeout_seconds 默认 60、最长 600。',
       inputSchema: z.object({
@@ -153,10 +153,16 @@ function makeTools(ctx: ToolCtx): ToolSet {
       execute: async ({ target, save_as, timeout_seconds }) =>
         guard(async () => {
           const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
+          // 会先删目标文件,故必须限制在 run 目录内,拒绝绝对路径/越界的 ..
           const abs = resolve(ctx.runDir, save_as);
+          const rel = relative(resolve(ctx.runDir), abs);
+          if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
+            return `save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
+          }
           const d = await session.clickAndSave(target, abs, ms);
+          const size = statSync(abs).size; // 先取 size 再记录,避免"已记录却报失败"的不一致
           traj.add({ kind: 'clickSave', target: d, path: save_as, timeoutMs: ms });
-          return withState(`已点击并保存文件:${save_as}(${statSync(abs).size} 字节),已记录到用例。`);
+          return withState(`已点击并保存文件:${save_as}(${size} 字节),已记录到用例。`);
         }),
     }),
 

@@ -341,26 +341,30 @@ export class Session {
         dialog.showSaveDialogSync = () => p;
       }, savePath);
     }
+    // 手动挂/摘监听而非 waitForEvent:无下载事件的路径(应用直写盘)下,
+    // waitForEvent 的监听会一直挂到自身超时,反复调用会堆积
     let download: Download | undefined;
-    this.page.waitForEvent('download', { timeout: timeoutMs }).then(
-      (d) => (download = d),
-      () => {},
-    );
-    await locator.click({ timeout: ACTION_TIMEOUT });
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      if (download) {
-        await download.saveAs(savePath);
-        return descriptor;
+    const onDownload = (d: Download) => (download = d);
+    this.page.on('download', onDownload);
+    try {
+      await locator.click({ timeout: ACTION_TIMEOUT });
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        if (download) {
+          await download.saveAs(savePath);
+          return descriptor;
+        }
+        if (existsSync(savePath)) return descriptor;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `点击后 ${Math.round(timeoutMs / 1000)}s 内未捕获到下载事件,目标文件也未出现:${savePath}。` +
+              `可能:该元素不触发保存;导出前还有未完成的选择;或应用把文件写去了别处。`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 200));
       }
-      if (existsSync(savePath)) return descriptor;
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `点击后 ${Math.round(timeoutMs / 1000)}s 内未捕获到下载事件,目标文件也未出现:${savePath}。` +
-            `可能:该元素不触发保存;导出前还有未完成的选择;或应用把文件写去了别处。`,
-        );
-      }
-      await new Promise((r) => setTimeout(r, 200));
+    } finally {
+      this.page.off('download', onDownload);
     }
   }
 
@@ -471,14 +475,19 @@ export const SAVE_HELPER_TS = `async function clickAndSave(page: any, electronAp
     }, abs);
   }
   let download: any;
-  page.waitForEvent('download', { timeout: timeoutMs }).then((d: any) => (download = d), () => {});
-  await locator.click();
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (download) { await download.saveAs(abs); break; }
-    if (existsSync(abs)) break;
-    if (Date.now() >= deadline) throw new Error('保存超时 ' + timeoutMs + 'ms:未捕获下载事件,文件也未出现:' + abs);
-    await new Promise((r) => setTimeout(r, 200));
+  const onDownload = (d: any) => (download = d);
+  page.on('download', onDownload);
+  try {
+    await locator.click();
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      if (download) { await download.saveAs(abs); break; }
+      if (existsSync(abs)) break;
+      if (Date.now() >= deadline) throw new Error('保存超时 ' + timeoutMs + 'ms:未捕获下载事件,文件也未出现:' + abs);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  } finally {
+    page.off('download', onDownload);
   }
   expect(existsSync(abs)).toBe(true);
 }`;
