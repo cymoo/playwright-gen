@@ -18,6 +18,8 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 
+import { loadConfig, validateDescription, referenceError, writeRuntime, type ReuseConfig } from './config';
+import { paramText, paramCommand, literalReferenceError } from './runtime';
 import { Session } from './browser';
 import { computeTimeout, renderTest } from './codegen';
 import { deepseekModel, envMaxSteps } from './models';
@@ -106,10 +108,13 @@ interface ToolCtx {
   mark: number; // 当前步骤在轨迹里的起点
   needsAssert: boolean;
   flag: StepFlag;
+  config: ReuseConfig;
+  description: string;
 }
 
-function makeTools(ctx: ToolCtx): ToolSet {
+export function makeTools(ctx: ToolCtx): ToolSet {
   const { session, traj } = ctx;
+  const pendingFailures = new Set<string>();
 
   const withState = async (msg: string) => `${msg}\n\n${await session.snapshot()}`;
   // 所有异常(定位失败/超时等)都转为文字反馈给模型,让它自纠而不是中断对话
@@ -154,7 +159,7 @@ function makeTools(ctx: ToolCtx): ToolSet {
         guard(async () => {
           const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
           // 会先删目标文件,故必须限制在 run 目录内,拒绝绝对路径/越界的 ..
-          const abs = resolve(ctx.runDir, save_as);
+          const abs = resolve(ctx.runDir, paramText(save_as, ctx.config.params));
           const rel = relative(resolve(ctx.runDir), abs);
           if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
             return `save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
@@ -313,7 +318,7 @@ function makeTools(ctx: ToolCtx): ToolSet {
       execute: async ({ command, stdin_lines, timeout_seconds }) =>
         guard(async () => {
           const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
-          const r = await execShell(command, { stdinLines: stdin_lines, timeoutMs: ms, cwd: ctx.runDir });
+          const r = await execShell(paramCommand(command, ctx.config.params), { stdinLines: stdin_lines?.map(line => paramCommand(line, ctx.config.params)), timeoutMs: ms, cwd: ctx.runDir });
           if (r.timedOut) return `命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
           if (r.code === null) return `命令启动失败或被信号终止,未记录到用例。输出:\n${capOutput(r.output)}`;
           if (r.code !== 0) return `命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
@@ -328,9 +333,9 @@ function makeTools(ctx: ToolCtx): ToolSet {
       inputSchema: z.object({ path: z.string(), content: z.string() }),
       execute: async ({ path, content }) =>
         guard(async () => {
-          const abs = resolve(ctx.runDir, path);
+          const abs = resolve(ctx.runDir, paramText(path, ctx.config.params));
           mkdirSync(dirname(abs), { recursive: true });
-          writeFileSync(abs, content, 'utf-8');
+          writeFileSync(abs, paramText(content, ctx.config.params), 'utf-8');
           traj.add({ kind: 'writeFile', path, content });
           return `已写入文件:${path}(${Buffer.byteLength(content, 'utf-8')} 字节),已记录到用例。`;
         }),
@@ -341,14 +346,17 @@ function makeTools(ctx: ToolCtx): ToolSet {
         '读取本地文件内容用于观察判断(UTF-8,超长会截断中间)。只用于观察,不记入用例。相对路径相对本次运行目录解析。',
       inputSchema: z.object({ path: z.string() }),
       execute: async ({ path }) =>
-        guard(async () => capOutput(readFileSync(resolve(ctx.runDir, path), 'utf-8'))),
+        guard(async () => capOutput(readFileSync(resolve(ctx.runDir, paramText(path, ctx.config.params)), 'utf-8'))),
     }),
 
     step_done: tool({
       description: '当前步骤的全部要求(含预期结果的断言)都完成后调用,给出一句执行摘要。成功后停止,不要再调用任何工具。',
       inputSchema: z.object({ summary: z.string() }),
       execute: async ({ summary }) => {
+        if (pendingFailures.size) return `操作失败尚未修正，请重新正确执行: ${[...pendingFailures].join(', ')}`;
         const delta = traj.since(ctx.mark);
+        const refError = referenceError(ctx.description, delta, ctx.config);
+        if (refError) return refError;
         if (delta.length === 0) {
           return '还没有执行任何操作或断言,不能结束该步骤。请先按步骤描述实际操作页面。';
         }
@@ -356,7 +364,7 @@ function makeTools(ctx: ToolCtx): ToolSet {
         const hasAssert = delta.some(
           (s) => s.kind.startsWith('assert') || s.kind === 'runCommand' || s.kind === 'clickSave',
         );
-        if (ctx.needsAssert && !hasAssert && ctx.flag.rejects < 2) {
+        if (ctx.needsAssert && !hasAssert) {
           ctx.flag.rejects += 1;
           return '该步骤描述了预期结果,但尚未做任何断言。请先用 assert_visible / assert_text / wait_for 验证预期(命令执行由成功的 run_command 覆盖,文件保存由 click_and_save 覆盖),再调用 step_done。';
         }
@@ -379,6 +387,27 @@ function makeTools(ctx: ToolCtx): ToolSet {
     });
   }
 
+  for (const [name, configuredTool] of Object.entries(tools)) {
+    if (!configuredTool.execute || ['step_done', 'get_page_state', 'look'].includes(name)) continue;
+    const execute = configuredTool.execute;
+    configuredTool.execute = (input, options) => {
+      // Ref/alias handles are validated through the resolved descriptor, not their spelling.
+      const args = { ...input };
+      if (typeof args.target === 'string' && /^(?:e\d+|@[A-Za-z_]\w*)$/.test(args.target)) delete args.target;
+      const error = literalReferenceError(args, ctx.config.params);
+      if (error) {
+        pendingFailures.add(name);
+        return Promise.resolve(`操作失败:${error}`);
+      }
+      return Promise.resolve(execute(input, options)).then(result => {
+        if (typeof result === 'string') {
+          if (result.startsWith('操作失败:')) pendingFailures.add(name);
+          else pendingFailures.delete(name);
+        }
+        return result;
+      });
+    };
+  }
   return tools;
 }
 
@@ -436,7 +465,8 @@ async function explore(
   const headless = !opts.headed;
   const budget = opts.maxSteps ?? envMaxSteps();
   const tracePath = opts.trace ? join(runDir, `trace_round${round}.zip`) : undefined;
-  const session = new Session(opts.target, { headless, slowMo: headless ? 0 : 500, tracePath });
+  const config = opts.config ?? loadConfig();
+  const session = new Session(opts.target, { headless, slowMo: headless ? 0 : 500, tracePath, ...config });
 
   const traj = new Trajectory();
   const summaries: string[] = [];
@@ -456,43 +486,34 @@ async function explore(
       const mark = traj.steps.length;
       console.log(`  [${step.title} · ${i + 1}/${plan.steps.length}] ${step.text.slice(0, 60)}`);
 
-      let done = false;
-      let retryHint: string | undefined;
-      for (let attempt = 1; attempt <= 2 && !done; attempt++) {
-        const flag: StepFlag = { done: false, summary: '', rejects: 0 };
-        const tools = makeTools({
-          session,
-          traj,
-          runDir,
-          vision: !!opts.vision,
-          mark,
-          needsAssert: EXPECTATION_RE.test(step.text),
-          flag,
-        });
-        const hints = [replayHint, retryHint].filter((h): h is string => !!h);
-        const state = await session.snapshot();
-        await generateText({
-          model: deepseekModel(),
-          system: AGENT_SYSTEM,
-          prompt: buildStepPrompt(plan, i, summaries, state, hints),
-          tools,
-          stopWhen: [stepCountIs(budget), () => flag.done],
-        });
+      const flag: StepFlag = { done: false, summary: '', rejects: 0 };
+      const tools = makeTools({
+        session,
+        config,
+        description: step.text,
+        traj,
+        runDir,
+        vision: !!opts.vision,
+        mark,
+        needsAssert: EXPECTATION_RE.test(step.text),
+        flag,
+      });
+      const hints = [replayHint].filter((h): h is string => !!h);
+      const state = await session.snapshot();
+      await generateText({
+        model: deepseekModel(),
+        system: AGENT_SYSTEM + `
+复用约定:用户的参数占位符必须原样传给工具，不得替换为样例值；@规则名必须原样作为 target，禁止改用 ref 或当次编号。参数 ${JSON.stringify(config.params)}；规则 ${JSON.stringify(config.rules)}。不支持自动循环和条件分支；用户需拆成明确步骤或独立场景，目录遍历由 replay 命令处理。`,
+        prompt: buildStepPrompt(plan, i, summaries, state, hints),
+        tools,
+        stopWhen: [stepCountIs(budget), () => flag.done],
+      });
 
-        if (flag.done) {
-          done = true;
-          summaries.push(flag.summary || '(已完成)');
-          console.log(`    ✓ ${flag.summary.slice(0, 80)}`);
-        } else if (attempt === 1) {
-          retryHint =
-            '上一次尝试未能完成该步骤就停止了。请更直接地按步骤要求执行;若在等待耗时过程,用 wait_for 并给足 timeout_seconds;完成后必须调用 step_done。';
-          console.log('    ↻ 未完成,重试一次');
-        }
+      if (!flag.done) {
+        return { traj, summaries, failed: { index: i, reason: '本次步骤未完成；丢弃会话，通过 --max-repairs 从新会话重新探索' } };
       }
-
-      if (!done) {
-        return { traj, summaries, failed: { index: i, reason: '两次尝试均未完成该步骤' } };
-      }
+      summaries.push(flag.summary || '(已完成)');
+      console.log(`    ✓ ${flag.summary.slice(0, 80)}`);
     }
     return { traj, summaries };
   } finally {
@@ -512,11 +533,16 @@ export interface RunOpts {
   maxSteps?: number;
   maxRepairs?: number;
   trace?: boolean;
+  config?: ReuseConfig;
 }
 
 export async function run(opts: RunOpts): Promise<void> {
+  const config = opts.config ?? loadConfig();
+  validateDescription(opts.description, config);
+  if (JSON.stringify(opts.target).includes('${')) throw new Error('入口 URL/应用路径暂不支持参数占位符，请直接通过 --url/--electron-bin 提供');
   const runDir = makeRunDir(opts.outDir, opts.name);
   const testPath = join(runDir, 'test_generated.spec.ts');
+  writeRuntime(runDir);
   const plan = splitSteps(opts.description);
   const testName = opts.name?.trim() || opts.description.replace(/\s+/g, ' ').slice(0, 50);
 
@@ -555,8 +581,11 @@ export async function run(opts: RunOpts): Promise<void> {
       continue;
     }
 
+    const refError = referenceError(opts.description, ex.traj.steps, config);
+    if (refError) { replayHint = lastFailure = refError; continue; }
+
     console.log('[回放] 用全新上下文运行生成的用例…');
-    const { passed, output } = await runPlaywright(testPath, computeTimeout(ex.traj) + 60_000);
+    const { passed, output } = await runPlaywright(testPath, computeTimeout(ex.traj) + 60_000, config.params);
     if (passed) {
       console.log(`\n✅ 全部 ${plan.steps.length} 个步骤完成,clean-replay 通过 → ${testPath}`);
       ex.summaries.forEach((s, i) => console.log(`  ${plan.steps[i].title}: ${s}`));

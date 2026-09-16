@@ -47,6 +47,7 @@ export function candidateDescriptors(item: SnapshotItem): LocatorDescriptor[] {
 
 /** JS 单引号字符串字面量转义。 */
 export function jsLit(s: string): string {
+  if (/\$\{[A-Za-z_]\w*\}/.test(s)) return `paramText(${JSON.stringify(s)}, params)`;
   return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, '\\n') + "'";
 }
 
@@ -54,9 +55,10 @@ export function jsLit(s: string): string {
  * 把定位描述符渲染成 Playwright locator 表达式(默认基于 `page`)。
  * electron 形态下窗口对象也绑定为 `page`,故同一表达式两处通用。
  */
-export function renderLocator(d: LocatorDescriptor, base = 'page'): string {
+export function renderLocator(d: LocatorDescriptor, base = 'page', timeoutMs = 5000): string {
   let expr: string;
   switch (d.kind) {
+    case 'rule': return `(await resolveRule(page, ${JSON.stringify(d.rule)}, params, ${timeoutMs}))`;
     case 'role': {
       const opts: string[] = [];
       if (d.name) opts.push(`name: ${jsLit(d.name)}`);

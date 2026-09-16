@@ -10,19 +10,19 @@
 | 文件 | 职责 |
 |---|---|
 | `cli.ts` | 单命令入口：`--url` \| `--electron-bin`（互斥）+ `--description` |
-| `engine.ts` | 核心：`splitSteps` 步骤拆分 → 逐步骤 Agent 对话（AI SDK 工具循环）→ codegen → clean-replay → 修复；含全部工具定义与系统提示词 |
+| `engine.ts` | 核心：`splitSteps` 步骤拆分 → 逐步骤 Agent 对话（AI SDK 工具循环）→ codegen → clean-replay → 修复；含全部工具定义与系统提示词、显式引用完成校验 |
 | `browser.ts` | `Session`：统一 web（chromium+goto）与 electron（`_electron.launch`+`firstWindow`）；ARIA+`data-pwref` 快照（含开关选中态）、忠实定位 `resolve`、click/fill/check/**uncheck**/select/hover/press/scroll/**waitFor**/assert_* |
 | `trajectory.ts` | 结构化轨迹：`LocatorDescriptor` / `Step`（含 `stepStart` 分组标记、assertVisible 的 `timeoutMs`）/ `TargetSpec` |
 | `locators.ts` | `candidateDescriptors`（推导有序候选）+ `renderLocator`（渲染）；纯函数、可单测 |
 | `codegen.ts` | 轨迹 → 代码：web/electron 两形态、`test.step()` 分块、`computeTimeout` 按轨迹算 `test.setTimeout` |
 | `shell.ts` | `execShell`：一次性 shell 命令执行器（`shell: true`，stdin 逐行输入）+ 生成用例里的孪生辅助函数源码（`SHELL_HELPER_TS`/`WRITE_HELPER_TS`，同文件放置防漂移） |
-| `runner.ts` | `runPlaywright`：`playwright test` 裁判（每 run 目录自带极简 config，testDir `.`；Windows 经 shell 调 npx.cmd） |
+| `runner.ts` | `runPlaywright`：`playwright test` 裁判（每 run 目录自带极简 config，testDir `.`；通过 Node 直接启动 Playwright CLI，避免文件名 shell 插值） |
 | `models.ts` | deepseek / qwen：`createOpenAICompatible` + env；`envMaxSteps` |
 | `vision.ts` | `describeScreenshot`：Qwen 看图返回文本（file part） |
 
 ## 关键技术决策
 
-- **引擎持有步骤清单（本次重构的核心）**：描述里的 `步骤N：`/`Step N:` 被 `splitSteps` 确定性拆分（句首标注才算，少于 2 个则整段单步）。每个步骤跑一个**独立** `generateText` 对话：独立轮数预算（`MAX_STEPS`/步）、独立 `step_done` 完成标志（经引擎校验：必须有操作；步骤文本含"预期/出现/显示…"时必须有断言，至多驳回 2 次）。做不完显式失败：同会话重试 1 次 → 整轮重探（`--max-repairs`）→ 报错退出（exit 1）。**杜绝旧版"长对话截断/注意力飘移导致只生成前几步"**。
+- **引擎持有步骤清单（本次重构的核心）**：描述里的 `步骤N：`/`Step N:` 被 `splitSteps` 确定性拆分（句首标注才算，少于 2 个则整段单步）。每个步骤跑一个**独立** `generateText` 对话：独立轮数预算（`MAX_STEPS`/步）、独立 `step_done` 完成标志（经引擎校验：必须有操作；步骤文本含"预期/出现/显示…"时必须有断言，缺失断言始终驳回）。做不完显式失败：结束当前会话 → 从新会话整轮重探（`--max-repairs`）→ 报错退出（exit 1）。**杜绝旧版"长对话截断/注意力飘移导致只生成前几步"**。
 - **忠实定位（execute == record）**：`resolve()` 逐个尝试候选描述符（role+name > `getByLabel` > placeholder > testid > role+nth），用 Playwright 自己的枚举校验其唯一命中带 `data-pwref` 的目标元素（必要时按**真实序号**修 nth），**只记录真正执行的那个**。`data-pwref` 仅作 Agent 寻址句柄。
 - **长等待一等公民**：`wait_for(target, timeout_seconds≤600)` 等录制/加载/跳转（目标文本不必当前在页面上，`getByText(t).first()` 等出现）；记录为带 `timeoutMs` 的 `assertVisible`。`computeTimeout` = 30s + 1s/动作 + Σ断言超时，写进 `test.setTimeout`，runner 再 +60s——探索通过的长流程回放不会超时误判。
 - **开关/复选框**：快照标注 `[已选中]/[未选中]`；`check`/`uncheck` 成对（旧版没有 uncheck，"关闭开关/取消勾选"做不了）。
@@ -46,3 +46,11 @@ npx playwright test tests/unit.spec.ts     # 纯逻辑单测（splitSteps / loca
 
 `examples/` 是基准页面（静态 / 图标 / SPA 弹窗 / 登录后台）。
 Electron 代码路径已实现并通过类型检查/单测，但仓库不含打包二进制，需用真实应用本地验证。
+
+## 可复用用例（0.2.0）
+
+- `config.ts` 校验 params/rules；`runtime.ts` 提供参数解析和 scope + exact/numberSuffix + unique/first/index 规则，复制为生成目录的 `pwgen-runtime.ts`，执行与回放共用实现。
+- 描述中 `${name}` 和 `@rule` 必须保持显式引用，不得把样例值固化；规则写入轨迹，回放只覆盖参数。
+- `replay.ts` / `cli.ts replay` 每次扫描 PB/RDC 文件清单，逐文件独立运行同一 spec、注入 inputFile/inputName，报告失败汇总。不是通用循环/分支引擎。
+- 前 N 个资源要求用户写 N 个独立步骤，使用规则序号且列表排序稳定；条件场景拆分用例。详见 `docs/reusable-tests.md`。
+- `tests/reuse.spec.ts` 包含真实浏览器和生成用例回放测试；需要已安装 Chromium。

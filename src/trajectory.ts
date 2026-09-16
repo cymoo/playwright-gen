@@ -12,6 +12,7 @@
 
 /** 一个"如何唯一定位到某元素"的结构化描述,与目标(web/electron)无关。 */
 export type LocatorDescriptor =
+  | { kind: 'rule'; rule: import('./runtime').Rule; nth?: never }
   | { kind: 'role'; role: string; name?: string; exact?: boolean; nth?: number }
   | { kind: 'label'; text: string; exact?: boolean; nth?: number }
   | { kind: 'placeholder'; text: string; nth?: number }
