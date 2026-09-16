@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { mkdtempSync, writeFileSync, rmSync, readFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { paramText, paramCommand, resolveRule, type Rule } from '../src/runtime';
 import { loadConfig, referenceError, validateDescription, writeRuntime } from '../src/config';
 import { replay, scanFiles } from '../src/replay';
@@ -59,7 +60,7 @@ test('目录变更重新扫描，大小写扩展名、递归、逐项失败汇�
     expect(seen).toEqual(['a.pb', 'b.PB']);
     expect(JSON.parse(readFileSync(report, 'utf8')).results).toHaveLength(2);
     rmSync(join(dir, 'a.pb')); writeFileSync(join(dir, 'd.pb'), 'new');
-    expect(scanFiles(dir, 'pb').map(p => p.split('/').at(-1))).toEqual(['b.PB', 'd.pb']);
+    expect(scanFiles(dir, 'pb').map(p => basename(p))).toEqual(['b.PB', 'd.pb']);
     expect(() => scanFiles(dir, 'rdc')).toThrow('没有');
     writeFileSync(spec, '// no input references');
     await expect(replay({ spec, params: {}, inputDir: dir, ext: 'pb', timeoutMs: 1000, report })).rejects.toThrow('批量用例必须');
@@ -113,7 +114,7 @@ test('同一生成用例在参数和资源编号变化后通过真实回放', as
   try {
     const html = join(dir, 'fixture.html');
     const traj = new Trajectory();
-    traj.add({ kind: 'goto', url: new URL(`file://${html}`).href });
+    traj.add({ kind: 'goto', url: pathToFileURL(html).href });
     traj.add({ kind: 'fill', target: { kind: 'label', text: 'SN' }, value: '${deviceSn}' });
     traj.add({ kind: 'click', target: { kind: 'rule', rule } });
     traj.add({ kind: 'assertText', target: { kind: 'testId', testId: 'result' }, text: '${deviceSn}' });
@@ -126,5 +127,73 @@ test('同一生成用例在参数和资源编号变化后通过真实回放', as
       expect(result.output, '生成脚本真实回放失败').not.toContain('ReferenceError');
       expect(result.passed, result.output).toBe(true);
     }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('每个工具参数在执行前校验：断言引用不能掩盖固定输入', async () => {
+  const { makeTools } = await import('../src/engine');
+  const { literalReferenceError } = await import('../src/runtime');
+  expect(literalReferenceError({ text: 'sample-SN', assertion: '${sn}' }, { sn: 'sample-SN' })).toContain('${sn}');
+  const filled: string[] = [];
+  const session = {
+    fill: async (_target: string, value: string) => { filled.push(value); return { kind: 'label', text: 'SN' }; },
+    assertVisible: async () => ({ kind: 'text', text: '${sn}' }),
+    snapshot: async () => 'state',
+  } as unknown as Session;
+  const traj = new Trajectory();
+  const flag = { done: false, summary: '', rejects: 0 };
+  const tools = makeTools({ session, traj, runDir: '.', vision: false, mark: 0, needsAssert: true,
+    flag, config: { params: { sn: 'sample-SN' }, rules: {} }, description: '填写 ${sn} 并验证 ${sn}' });
+  const options = { toolCallId: 'test', messages: [], context: undefined };
+  const bad = await tools.fill.execute!({ target: 'e1', text: 'sample-SN' }, options);
+  expect(bad).toContain('操作失败');
+  expect(filled).toEqual([]);
+  await tools.assert_visible.execute!({ target: '${sn}' }, options);
+  await tools.step_done.execute!({ summary: 'done' }, options);
+  expect(flag.done).toBe(false);
+  await tools.fill.execute!({ target: 'e1', text: '${sn}' }, options);
+  await tools.step_done.execute!({ summary: 'done' }, options);
+  expect(filled).toEqual(['${sn}']);
+  expect(flag.done).toBe(true);
+});
+
+test('规则解析和可见性共用一个截止时间', async ({ page }) => {
+  const { waitRule } = await import('../src/runtime');
+  await page.setContent('<script>setTimeout(() => { document.body.insertAdjacentHTML("beforeend", \'<section id="resources"><button style="display:none">Buffer 1</button></section>\'); }, 350)</script>');
+  const started = Date.now();
+  await expect(waitRule(page, rule, {}, 800)).rejects.toThrow();
+  // Old implementation started a new 800 ms window after discovering the scope.
+  expect(Date.now() - started).toBeLessThan(1150);
+});
+
+test('生成的文件写入与下载保留参数，并拒绝越界保存', async () => {
+  test.setTimeout(60000);
+  const { runPlaywright } = await import('../src/runner');
+  const root = join(process.cwd(), 'output'); mkdirSync(root, { recursive: true });
+  const dir = mkdtempSync(join(root, 'reuse-files-'));
+  try {
+    const html = join(dir, 'fixture.html');
+    writeFileSync(html, '<a download="file.txt" href="data:text/plain,downloaded">Save</a>');
+    const traj = new Trajectory();
+    traj.add({ kind: 'goto', url: pathToFileURL(html).href });
+    traj.add({ kind: 'writeFile', path: 'notes/${inputName}.txt', content: '${content}' });
+    traj.add({ kind: 'clickSave', target: { kind: 'role', role: 'link', name: 'Save' }, path: '${savePath}', timeoutMs: 1000 });
+    const spec = join(dir, 'files.spec.ts');
+    writeFileSync(spec, renderTest(traj, { testName: 'files', description: '', target: { mode: 'web', url: '' } }));
+    writeRuntime(dir);
+    for (const inputName of ['one', 'two']) {
+      const result = await runPlaywright(spec, 20000, { inputName, content: `content ${inputName}`, savePath: `${inputName}.txt` });
+      expect(result.passed, result.output).toBe(true);
+      expect(readFileSync(join(dir, 'notes', `${inputName}.txt`), 'utf8')).toBe(`content ${inputName}`);
+      expect(readFileSync(join(dir, `${inputName}.txt`), 'utf8')).toBe('downloaded');
+    }
+    const outside = join(root, `${basename(dir)}-outside.txt`);
+    writeFileSync(outside, 'must remain');
+    try {
+      const rejected = await runPlaywright(spec, 20000, { inputName: 'three', content: 'x', savePath: `../${basename(outside)}` });
+      expect(rejected.passed).toBe(false);
+      expect(rejected.output).toContain('保存路径必须位于运行目录内');
+      expect(readFileSync(outside, 'utf8')).toBe('must remain');
+    } finally { rmSync(outside, { force: true }); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

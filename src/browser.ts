@@ -28,7 +28,7 @@ import {
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
-import { paramText, resolveRule, type Params, type Rule } from './runtime';
+import { paramText, resolveRule, waitRule, timeBudget, literalReferenceError, type Params, type Rule } from './runtime';
 import type { LocatorDescriptor, TargetSpec } from './trajectory';
 import { candidateDescriptors, type SnapshotItem } from './locators';
 
@@ -315,7 +315,11 @@ export class Session {
       // 逐个候选校验忠实性(执行 == 记录),取第一个能唯一命中该元素的
       for (const cand of r.candidates) {
         const faithful = await this.faithfulDescriptor(ref, cand);
-        if (faithful) return { locator: buildLocator(this.page, faithful), descriptor: faithful };
+        if (faithful) {
+          const error = literalReferenceError(faithful, this.opts.params ?? {});
+          if (error) throw new ResolveError(error);
+          return { locator: buildLocator(this.page, faithful), descriptor: faithful };
+        }
       }
       throw new ResolveError(
         `"${target}" 无法推导出稳定唯一的语义定位,请换用更明确的元素或 ref。当前:\n${this.refsBrief()}`,
@@ -323,6 +327,8 @@ export class Session {
     }
 
     // 2. 文本兜底(适合断言目标:提示 / 标题文本)
+    const error = literalReferenceError(t, this.opts.params ?? {});
+    if (error) throw new ResolveError(error);
     const byText = this.page.getByText(t);
     const cnt = await byText.count();
     if (cnt === 1) return { locator: byText, descriptor: { kind: 'text', text: t } };
@@ -434,6 +440,7 @@ export class Session {
   // ---- 断言 / 等待(实时校验 + 返回描述符供记录)----
 
   async assertVisible(target: string): Promise<LocatorDescriptor> {
+    if (target.startsWith('@')) return this.waitFor(target, ASSERT_TIMEOUT);
     const { locator, descriptor } = await this.resolve(target);
     await expect(locator).toBeVisible({ timeout: ASSERT_TIMEOUT });
     return descriptor;
@@ -459,9 +466,16 @@ export class Session {
    */
   async waitFor(target: string, timeoutMs: number): Promise<LocatorDescriptor> {
     const t = (target || '').trim();
-    if (this.refs.has(t) || t.startsWith('@') || t.includes('${')) {
-      const { locator, descriptor } = await this.resolve(t, timeoutMs);
-      await expect(locator).toBeVisible({ timeout: timeoutMs });
+    if (t.startsWith('@')) {
+      const rule = this.opts.rules?.[t.slice(1)];
+      if (!rule) throw new ResolveError(`未定义规则 ${t}`);
+      await waitRule(this.page, rule, this.opts.params ?? {}, timeoutMs);
+      return { kind: 'rule', rule };
+    }
+    const remaining = timeBudget(timeoutMs);
+    if (this.refs.has(t) || t.includes('${')) {
+      const { locator, descriptor } = await this.resolve(t, remaining());
+      await expect(locator).toBeVisible({ timeout: remaining() });
       return descriptor;
     }
     const d: LocatorDescriptor = { kind: 'text', text: t, nth: 0 };

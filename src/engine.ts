@@ -19,7 +19,7 @@ import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 
 import { loadConfig, validateDescription, referenceError, writeRuntime, type ReuseConfig } from './config';
-import { paramText, paramCommand } from './runtime';
+import { paramText, paramCommand, literalReferenceError } from './runtime';
 import { Session } from './browser';
 import { computeTimeout, renderTest } from './codegen';
 import { deepseekModel, envMaxSteps } from './models';
@@ -112,8 +112,9 @@ interface ToolCtx {
   description: string;
 }
 
-function makeTools(ctx: ToolCtx): ToolSet {
+export function makeTools(ctx: ToolCtx): ToolSet {
   const { session, traj } = ctx;
+  const pendingFailures = new Set<string>();
 
   const withState = async (msg: string) => `${msg}\n\n${await session.snapshot()}`;
   // 所有异常(定位失败/超时等)都转为文字反馈给模型,让它自纠而不是中断对话
@@ -352,6 +353,7 @@ function makeTools(ctx: ToolCtx): ToolSet {
       description: '当前步骤的全部要求(含预期结果的断言)都完成后调用,给出一句执行摘要。成功后停止,不要再调用任何工具。',
       inputSchema: z.object({ summary: z.string() }),
       execute: async ({ summary }) => {
+        if (pendingFailures.size) return `操作失败尚未修正，请重新正确执行: ${[...pendingFailures].join(', ')}`;
         const delta = traj.since(ctx.mark);
         const refError = referenceError(ctx.description, delta, ctx.config);
         if (refError) return refError;
@@ -385,6 +387,27 @@ function makeTools(ctx: ToolCtx): ToolSet {
     });
   }
 
+  for (const [name, configuredTool] of Object.entries(tools)) {
+    if (!configuredTool.execute || ['step_done', 'get_page_state', 'look'].includes(name)) continue;
+    const execute = configuredTool.execute;
+    configuredTool.execute = (input, options) => {
+      // Ref/alias handles are validated through the resolved descriptor, not their spelling.
+      const args = { ...input };
+      if (typeof args.target === 'string' && /^(?:e\d+|@[A-Za-z_]\w*)$/.test(args.target)) delete args.target;
+      const error = literalReferenceError(args, ctx.config.params);
+      if (error) {
+        pendingFailures.add(name);
+        return Promise.resolve(`操作失败:${error}`);
+      }
+      return Promise.resolve(execute(input, options)).then(result => {
+        if (typeof result === 'string') {
+          if (result.startsWith('操作失败:')) pendingFailures.add(name);
+          else pendingFailures.delete(name);
+        }
+        return result;
+      });
+    };
+  }
   return tools;
 }
 
@@ -463,46 +486,34 @@ async function explore(
       const mark = traj.steps.length;
       console.log(`  [${step.title} · ${i + 1}/${plan.steps.length}] ${step.text.slice(0, 60)}`);
 
-      let done = false;
-      let retryHint: string | undefined;
-      for (let attempt = 1; attempt <= 2 && !done; attempt++) {
-        const flag: StepFlag = { done: false, summary: '', rejects: 0 };
-        const tools = makeTools({
-          session,
-          config,
-          description: step.text,
-          traj,
-          runDir,
-          vision: !!opts.vision,
-          mark,
-          needsAssert: EXPECTATION_RE.test(step.text),
-          flag,
-        });
-        const hints = [replayHint, retryHint].filter((h): h is string => !!h);
-        const state = await session.snapshot();
-        await generateText({
-          model: deepseekModel(),
-          system: AGENT_SYSTEM + `
+      const flag: StepFlag = { done: false, summary: '', rejects: 0 };
+      const tools = makeTools({
+        session,
+        config,
+        description: step.text,
+        traj,
+        runDir,
+        vision: !!opts.vision,
+        mark,
+        needsAssert: EXPECTATION_RE.test(step.text),
+        flag,
+      });
+      const hints = [replayHint].filter((h): h is string => !!h);
+      const state = await session.snapshot();
+      await generateText({
+        model: deepseekModel(),
+        system: AGENT_SYSTEM + `
 复用约定:用户的参数占位符必须原样传给工具，不得替换为样例值；@规则名必须原样作为 target，禁止改用 ref 或当次编号。参数 ${JSON.stringify(config.params)}；规则 ${JSON.stringify(config.rules)}。不支持自动循环和条件分支；用户需拆成明确步骤或独立场景，目录遍历由 replay 命令处理。`,
-          prompt: buildStepPrompt(plan, i, summaries, state, hints),
-          tools,
-          stopWhen: [stepCountIs(budget), () => flag.done],
-        });
+        prompt: buildStepPrompt(plan, i, summaries, state, hints),
+        tools,
+        stopWhen: [stepCountIs(budget), () => flag.done],
+      });
 
-        if (flag.done) {
-          done = true;
-          summaries.push(flag.summary || '(已完成)');
-          console.log(`    ✓ ${flag.summary.slice(0, 80)}`);
-        } else if (attempt === 1) {
-          retryHint =
-            '上一次尝试未能完成该步骤就停止了。请更直接地按步骤要求执行;若在等待耗时过程,用 wait_for 并给足 timeout_seconds;完成后必须调用 step_done。';
-          console.log('    ↻ 未完成,重试一次');
-        }
+      if (!flag.done) {
+        return { traj, summaries, failed: { index: i, reason: '本次步骤未完成；丢弃会话，通过 --max-repairs 从新会话重新探索' } };
       }
-
-      if (!done) {
-        return { traj, summaries, failed: { index: i, reason: '两次尝试均未完成该步骤' } };
-      }
+      summaries.push(flag.summary || '(已完成)');
+      console.log(`    ✓ ${flag.summary.slice(0, 80)}`);
     }
     return { traj, summaries };
   } finally {

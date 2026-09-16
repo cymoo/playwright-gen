@@ -9,7 +9,7 @@
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 const RUN_CONFIG = `import { defineConfig } from '@playwright/test';
@@ -35,12 +35,15 @@ export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Rec
   const dir = dirname(specFile);
   const base = basename(specFile).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
   ensureRunConfig(dir);
+  const packagePath = createRequire(import.meta.url).resolve('@playwright/test/package.json');
+  const metadata = JSON.parse(readFileSync(packagePath, 'utf8')) as { bin: { playwright: string } };
+  const cliPath = join(dirname(packagePath), metadata.bin.playwright);
 
   return new Promise((resolve) => {
     let timedOut = false;
     const child = spawn(
       process.execPath,
-      [createRequire(import.meta.url).resolve('@playwright/test/cli'), 'test', base, '--workers=1', '--reporter=line', '-c', 'playwright.config.ts'],
+      [cliPath, 'test', base, '--workers=1', '--reporter=line', '-c', 'playwright.config.ts'],
       // Direct Node invocation avoids Windows shell interpolation of user-provided filenames.
       { cwd: dir, env: { ...process.env, PWGEN_PARAMS: JSON.stringify(params) }, detached: process.platform !== 'win32' },
     );

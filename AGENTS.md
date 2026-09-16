@@ -22,7 +22,7 @@
 
 ## 关键技术决策
 
-- **引擎持有步骤清单（本次重构的核心）**：描述里的 `步骤N：`/`Step N:` 被 `splitSteps` 确定性拆分（句首标注才算，少于 2 个则整段单步）。每个步骤跑一个**独立** `generateText` 对话：独立轮数预算（`MAX_STEPS`/步）、独立 `step_done` 完成标志（经引擎校验：必须有操作；步骤文本含"预期/出现/显示…"时必须有断言，缺失断言始终驳回）。做不完显式失败：同会话重试 1 次 → 整轮重探（`--max-repairs`）→ 报错退出（exit 1）。**杜绝旧版"长对话截断/注意力飘移导致只生成前几步"**。
+- **引擎持有步骤清单（本次重构的核心）**：描述里的 `步骤N：`/`Step N:` 被 `splitSteps` 确定性拆分（句首标注才算，少于 2 个则整段单步）。每个步骤跑一个**独立** `generateText` 对话：独立轮数预算（`MAX_STEPS`/步）、独立 `step_done` 完成标志（经引擎校验：必须有操作；步骤文本含"预期/出现/显示…"时必须有断言，缺失断言始终驳回）。做不完显式失败：结束当前会话 → 从新会话整轮重探（`--max-repairs`）→ 报错退出（exit 1）。**杜绝旧版"长对话截断/注意力飘移导致只生成前几步"**。
 - **忠实定位（execute == record）**：`resolve()` 逐个尝试候选描述符（role+name > `getByLabel` > placeholder > testid > role+nth），用 Playwright 自己的枚举校验其唯一命中带 `data-pwref` 的目标元素（必要时按**真实序号**修 nth），**只记录真正执行的那个**。`data-pwref` 仅作 Agent 寻址句柄。
 - **长等待一等公民**：`wait_for(target, timeout_seconds≤600)` 等录制/加载/跳转（目标文本不必当前在页面上，`getByText(t).first()` 等出现）；记录为带 `timeoutMs` 的 `assertVisible`。`computeTimeout` = 30s + 1s/动作 + Σ断言超时，写进 `test.setTimeout`，runner 再 +60s——探索通过的长流程回放不会超时误判。
 - **开关/复选框**：快照标注 `[已选中]/[未选中]`；`check`/`uncheck` 成对（旧版没有 uncheck，"关闭开关/取消勾选"做不了）。

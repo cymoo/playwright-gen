@@ -47,6 +47,7 @@ function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
         ? `await ${renderLocator(s.target)}.press(${jsLit(s.key)});`
         : `await page.keyboard.press(${jsLit(s.key)});`;
     case 'assertVisible': {
+      if (s.target.kind === 'rule') return `await waitRule(page, ${JSON.stringify(s.target.rule)}, params, ${s.timeoutMs ?? DEFAULT_ASSERT_MS});`;
       const opt = s.timeoutMs && s.timeoutMs !== DEFAULT_ASSERT_MS ? `{ timeout: ${s.timeoutMs} }` : '';
       return `await expect(${renderLocator(s.target, 'page', s.timeoutMs ?? DEFAULT_ASSERT_MS)}).toBeVisible(${opt});`;
     }
@@ -79,6 +80,7 @@ export function computeTimeout(traj: Trajectory): number {
   for (const s of traj.steps) {
     if (s.kind === 'stepStart') continue;
     ms += 1_000;
+    if ('target' in s && s.target?.kind === 'rule' && s.kind !== 'assertVisible') ms += DEFAULT_ASSERT_MS;
     if (s.kind === 'assertVisible') ms += s.timeoutMs ?? DEFAULT_ASSERT_MS;
     else if (s.kind.startsWith('assert')) ms += DEFAULT_ASSERT_MS;
     else if (s.kind === 'runCommand' || s.kind === 'clickSave') ms += s.timeoutMs;
@@ -176,7 +178,7 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
 
   const reusable = JSON.stringify([traj.steps, target, testName]).includes('${') || traj.steps.some(s => 'target' in s && s.target?.kind === 'rule');
   if (reusable) {
-    extra.imports += `import { readParams, paramText, paramCommand, resolveRule } from './pwgen-runtime';\n`;
+    extra.imports += `import { readParams, paramText, paramCommand, resolveRule, waitRule } from './pwgen-runtime';\n`;
     extra.helpers = `const params = readParams();\n` +
       requiredParams.map(name => `paramText(${JSON.stringify('${' + name + '}')}, params);\n`).join('') + '\n' + extra.helpers;
   }
