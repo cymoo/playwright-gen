@@ -11,6 +11,8 @@
 import { Command } from 'commander';
 
 import { resolveElectronBinary } from './browser';
+import { loadConfig } from './config';
+import { replay } from './replay';
 import { run } from './engine';
 import type { TargetSpec } from './trajectory';
 
@@ -40,6 +42,7 @@ program
   .option('--electron-bin <path>', 'Electron 可执行文件路径(macOS 可传 .app,自动解析内部二进制)')
   .option('--electron-args <args>', 'Electron 启动参数(空格分隔)')
   .requiredOption('--description <text>', '自然语言场景描述;多步骤用"步骤1:… 步骤2:…"标注')
+  .option('--config <path>', '复用配置 JSON: params 和 rules')
   .option('--out-dir <dir>', '输出目录', './output')
   .option('--name <name>', '本次运行名称(默认时间戳)')
   .option('--vision', '启用 qwen 视觉 look 工具', false)
@@ -51,6 +54,7 @@ program
     const target = resolveTarget(o.url, o.electronBin, o.electronArgs);
     await run({
       target,
+      config: loadConfig(o.config),
       description: o.description,
       outDir: o.outDir,
       name: o.name,
@@ -62,7 +66,25 @@ program
     });
   });
 
-program.parseAsync().catch((e: unknown) => {
+const replayProgram = new Command('replay')
+  .requiredOption('--spec <path>', '已生成的单文件用例')
+  .option('--config <path>', '参数配置 JSON')
+  .option('--input-dir <path>', '逐文件回放的输入目录')
+  .option('--ext <extension>', '文件扩展名: pb 或 rdc')
+  .option('--recursive', '递归扫描子目录', false)
+  .option('--timeout <seconds>', '每个文件的外层超时秒数', '960')
+  .option('--report <path>', 'JSON 汇总路径', './replay-results.json')
+  .action(async o => {
+    const result = await replay({ spec: o.spec, params: loadConfig(o.config).params,
+      inputDir: o.inputDir, ext: o.ext, recursive: o.recursive,
+      timeoutMs: Number(o.timeout) * 1000, report: o.report });
+    if (result.some(r => !r.passed)) process.exitCode = 1;
+  });
+
+const invocation = process.argv[2] === 'replay'
+  ? replayProgram.parseAsync(process.argv.slice(3), { from: 'user' })
+  : program.parseAsync();
+invocation.catch((e: unknown) => {
   console.error(e instanceof Error ? e.message : String(e));
   process.exit(1);
 });

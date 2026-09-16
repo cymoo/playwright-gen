@@ -4,6 +4,12 @@
 
 一个通用命令，不分版本：Agent 在真实浏览器/应用里**逐步骤**操作，引擎记录每一步真正成功的操作与断言，确定性渲染成**一个用例文件**，再用全新上下文回放验证（clean-replay），失败自动带日志重试。
 
+## 可复用用例（0.2.0）
+
+使用 `--config reuse.json` 声明参数和定位规则；描述中用 `${deviceSn}`、`${packageName}`、`@counterProcess` 等显式引用。生成后用 `replay --spec ... --config ...` 换参数运行；加 `--input-dir ... --ext pb` 可逐文件回放，无需再次调用模型。
+
+完整配置、Windows/命令行注意事项、资源编号与 PID 处理、前 5 个资源的描述改写、PB/RDC 批量回放和限制见 **[可复用用例指南](docs/reusable-tests.md)**。动态规则需要实际页面的稳定范围，文档中的选择器仅为示意。生成目录中的 `pwgen-runtime.ts` 应与用例一同保存。
+
 ## 快速开始
 
 ```bash

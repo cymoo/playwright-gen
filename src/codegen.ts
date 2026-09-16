@@ -48,7 +48,7 @@ function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
         : `await page.keyboard.press(${jsLit(s.key)});`;
     case 'assertVisible': {
       const opt = s.timeoutMs && s.timeoutMs !== DEFAULT_ASSERT_MS ? `{ timeout: ${s.timeoutMs} }` : '';
-      return `await expect(${renderLocator(s.target)}).toBeVisible(${opt});`;
+      return `await expect(${renderLocator(s.target, 'page', s.timeoutMs ?? DEFAULT_ASSERT_MS)}).toBeVisible(${opt});`;
     }
     case 'assertText':
       return `await expect(${renderLocator(s.target)}).toContainText(${jsLit(s.text)});`;
@@ -57,8 +57,8 @@ function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
     case 'assertTitle':
       return `await expect(page).toHaveTitle(new RegExp(${jsLit(s.pattern)}));`;
     case 'runCommand': {
-      const stdinLit = s.stdin?.length ? `[${s.stdin.map(jsLit).join(', ')}]` : 'undefined';
-      return `expect(await runCommand(${jsLit(s.command)}, ${stdinLit}, ${s.timeoutMs})).toBe(0);`;
+      const stdinLit = s.stdin?.length ? `[${s.stdin.map(v => v.includes('${') ? `paramCommand(${JSON.stringify(v)}, params)` : jsLit(v)).join(', ')}]` : 'undefined';
+      return `expect(await runCommand(${s.command.includes('${') ? `paramCommand(${JSON.stringify(s.command)}, params)` : jsLit(s.command)}, ${stdinLit}, ${s.timeoutMs})).toBe(0);`;
     }
     case 'writeFile':
       return `writeFileTo(${jsLit(s.path)}, ${jsLit(s.content)});`;
@@ -147,7 +147,7 @@ function nodeHelpers(traj: Trajectory): { imports: string; helpers: string } {
   ].filter((n): n is string => !!n);
   if (fsNames.length) imports.push(`import { ${fsNames.join(', ')} } from 'node:fs';`);
   if (hasCmd || hasWrite || hasSave) {
-    imports.push(`import { dirname${hasWrite || hasSave ? ', resolve' : ''} } from 'node:path';`);
+    imports.push(`import { dirname${hasWrite || hasSave ? ', resolve' : ''}${hasSave ? ', relative, isAbsolute' : ''} } from 'node:path';`);
   }
   if (hasCmd) helpers.push(SHELL_HELPER_TS);
   if (hasWrite) helpers.push(WRITE_HELPER_TS);
@@ -170,11 +170,21 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
   const groups = groupByStep(traj.steps);
   const timeout = computeTimeout(traj);
   const extra = nodeHelpers(traj);
+  const semanticSteps = traj.steps.filter(s => s.kind !== 'stepStart');
+  const requiredParams = [...new Set([...JSON.stringify(semanticSteps).matchAll(/\$\{([A-Za-z_]\w*)\}/g)].map(m => m[1]))];
+  const metadata = `// pwgen-parameters: ${JSON.stringify(requiredParams)}\n`;
+
+  const reusable = JSON.stringify([traj.steps, target, testName]).includes('${') || traj.steps.some(s => 'target' in s && s.target?.kind === 'rule');
+  if (reusable) {
+    extra.imports += `import { readParams, paramText, paramCommand, resolveRule } from './pwgen-runtime';\n`;
+    extra.helpers = `const params = readParams();\n` +
+      requiredParams.map(name => `paramText(${JSON.stringify('${' + name + '}')}, params);\n`).join('') + '\n' + extra.helpers;
+  }
 
   if (target.mode === 'electron') {
     const argsLit = `[${target.args.map(jsLit).join(', ')}]`;
     return (
-      `import { test, expect, _electron as electron } from '@playwright/test';\n` +
+      metadata + `import { test, expect, _electron as electron } from '@playwright/test';\n` +
       extra.imports +
       `\n` +
       extra.helpers +
@@ -193,7 +203,7 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
   }
 
   return (
-    `import { test, expect } from '@playwright/test';\n` +
+    metadata + `import { test, expect } from '@playwright/test';\n` +
     extra.imports +
     `\n` +
     extra.helpers +

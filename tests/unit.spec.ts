@@ -246,7 +246,7 @@ test('renderTest: clickSave web 形态 → 注入 fs/path import 与 clickAndSav
   });
   const code = renderTest(t, { testName: 'sv', description: 'd', target: { mode: 'web', url: 'https://x.test/' } });
   expect(code).toContain(`import { existsSync, mkdirSync, rmSync } from 'node:fs';`);
-  expect(code).toContain(`import { dirname, resolve } from 'node:path';`);
+  expect(code).toContain(`import { dirname, resolve, relative, isAbsolute } from 'node:path';`);
   expect(code).toContain('async function clickAndSave(');
   expect(code).toContain(
     `await clickAndSave(page, undefined, page.getByRole('button', { name: '保存' }), 'GPU_Counters_Data.csv', 60000);`,
@@ -279,7 +279,7 @@ test('renderTest: clickSave 与 writeFile 共存 → fs import 合并去重', ()
   t.add({ kind: 'clickSave', target: { kind: 'text', text: '保存' }, path: 'b.csv', timeoutMs: 60_000 });
   const code = renderTest(t, { testName: 'mix', description: 'd', target: { mode: 'web', url: 'u' } });
   expect(code).toContain(`import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';`);
-  expect(code).toContain(`import { dirname, resolve } from 'node:path';`);
+  expect(code).toContain(`import { dirname, resolve, relative, isAbsolute } from 'node:path';`);
   expect(code).toContain('function writeFileTo(');
   expect(code).toContain('async function clickAndSave(');
 });

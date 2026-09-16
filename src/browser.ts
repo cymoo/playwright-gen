@@ -28,6 +28,7 @@ import {
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
+import { paramText, resolveRule, type Params, type Rule } from './runtime';
 import type { LocatorDescriptor, TargetSpec } from './trajectory';
 import { candidateDescriptors, type SnapshotItem } from './locators';
 
@@ -122,6 +123,7 @@ interface ScanItem extends SnapshotItem {
 export function buildLocator(page: Page, d: LocatorDescriptor): Locator {
   let loc: Locator;
   switch (d.kind) {
+    case 'rule': throw new Error('规则必须通过 resolveRule 异步解析');
     case 'role':
       loc = page.getByRole(d.role as Parameters<Page['getByRole']>[0], {
         name: d.name,
@@ -177,6 +179,8 @@ export interface SessionOpts {
   headless: boolean;
   slowMo?: number;
   tracePath?: string;
+  params?: Params;
+  rules?: Record<string, Rule>;
 }
 
 export class Session {
@@ -265,6 +269,7 @@ export class Session {
 
   /** 校验/修复 guess 描述符,使其唯一命中 data-pwref=ref 的元素;不行返回 null。 */
   private async faithfulDescriptor(ref: string, guess: LocatorDescriptor): Promise<LocatorDescriptor | null> {
+    if (guess.kind === 'rule') return null;
     if (await elementIsRef(buildLocator(this.page, guess), ref)) return guess;
     // 据 Playwright 自己的枚举修复 nth(对齐真实序号,消除手写 accname 近似导致的偏差)
     const base = buildLocator(this.page, { ...guess, nth: undefined } as LocatorDescriptor);
@@ -277,8 +282,19 @@ export class Session {
     return null;
   }
 
-  async resolve(target: string): Promise<{ locator: Locator; descriptor: LocatorDescriptor }> {
+  async resolve(target: string, timeout = ASSERT_TIMEOUT): Promise<{ locator: Locator; descriptor: LocatorDescriptor }> {
     const t = (target || '').trim();
+    if (t.startsWith('@')) {
+      const rule = this.opts.rules?.[t.slice(1)];
+      if (!rule) throw new ResolveError(`未定义规则 ${t}`);
+      return { locator: await resolveRule(this.page, rule, this.opts.params ?? {}, timeout), descriptor: { kind: 'rule', rule } };
+    }
+    if (/\$\{[A-Za-z_]\w*\}/.test(t)) {
+      const descriptor: LocatorDescriptor = { kind: 'text', text: t, exact: true };
+      const locator = this.page.getByText(paramText(t, this.opts.params ?? {}), { exact: true });
+      await expect(locator).toHaveCount(1, { timeout });
+      return { locator, descriptor };
+    }
 
     // 1. 命中已知 ref(直接 e3,或据可见名称唯一匹配到某 ref)
     let ref: string | undefined;
@@ -370,7 +386,7 @@ export class Session {
 
   async fill(target: string, text: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.fill(text, { timeout: ACTION_TIMEOUT });
+    await locator.fill(paramText(text, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
@@ -388,7 +404,7 @@ export class Session {
 
   async selectOption(target: string, value: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await locator.selectOption(value, { timeout: ACTION_TIMEOUT });
+    await locator.selectOption(paramText(value, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
     return descriptor;
   }
 
@@ -401,10 +417,10 @@ export class Session {
   async press(key: string, target?: string): Promise<LocatorDescriptor | undefined> {
     if (target) {
       const { locator, descriptor } = await this.resolve(target);
-      await locator.press(key, { timeout: ACTION_TIMEOUT });
+      await locator.press(paramText(key, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
       return descriptor;
     }
-    await this.page.keyboard.press(key);
+    await this.page.keyboard.press(paramText(key, this.opts.params ?? {}));
     return undefined;
   }
 
@@ -425,16 +441,16 @@ export class Session {
 
   async assertText(target: string, text: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
-    await expect(locator).toContainText(text, { timeout: ASSERT_TIMEOUT });
+    await expect(locator).toContainText(paramText(text, this.opts.params ?? {}), { timeout: ASSERT_TIMEOUT });
     return descriptor;
   }
 
   async assertUrl(pattern: string): Promise<void> {
-    await expect(this.page).toHaveURL(new RegExp(pattern), { timeout: ASSERT_TIMEOUT });
+    await expect(this.page).toHaveURL(new RegExp(paramText(pattern, this.opts.params ?? {})), { timeout: ASSERT_TIMEOUT });
   }
 
   async assertTitle(pattern: string): Promise<void> {
-    await expect(this.page).toHaveTitle(new RegExp(pattern), { timeout: ASSERT_TIMEOUT });
+    await expect(this.page).toHaveTitle(new RegExp(paramText(pattern, this.opts.params ?? {})), { timeout: ASSERT_TIMEOUT });
   }
 
   /**
@@ -443,8 +459,8 @@ export class Session {
    */
   async waitFor(target: string, timeoutMs: number): Promise<LocatorDescriptor> {
     const t = (target || '').trim();
-    if (this.refs.has(t)) {
-      const { locator, descriptor } = await this.resolve(t);
+    if (this.refs.has(t) || t.startsWith('@') || t.includes('${')) {
+      const { locator, descriptor } = await this.resolve(t, timeoutMs);
       await expect(locator).toBeVisible({ timeout: timeoutMs });
       return descriptor;
     }
@@ -465,7 +481,10 @@ export class Session {
  * 相对路径按 spec 所在目录解析,与 run_command / write_file 一致。web 形态 electronApp 传 undefined。
  */
 export const SAVE_HELPER_TS = `async function clickAndSave(page: any, electronApp: any, locator: any, p: string, timeoutMs: number): Promise<void> {
-  const abs = resolve(dirname(test.info().file), p);
+  const root = dirname(test.info().file);
+  const abs = resolve(root, p);
+  const rel = relative(root, abs);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error('保存路径必须位于运行目录内');
   mkdirSync(dirname(abs), { recursive: true });
   rmSync(abs, { force: true });
   if (electronApp) {
