@@ -55,3 +55,4 @@ Electron 代码路径已实现并通过类型检查/单测，但仓库不含打�
 - 前 N 个资源要求用户写 N 个独立步骤，使用规则序号且列表排序稳定；条件场景拆分用例。详见 `docs/reusable-tests.md`。
 - `tests/reuse.spec.ts` 包含真实浏览器和生成用例回放测试；需要已安装 Chromium。
 - 0.2.1：参数目标可从快照控件名称推导保留模板的忠实定位；含样例值的 ref 候选继续尝试稳定候选，不降级为固定序号。普通工具失败允许换工具恢复，固定输入仍须纠正。探索诊断写入 `exploration_roundN.jsonl`；排查见 `docs/parameterized-exploration.md`。
+- 0.2.2：`assert_text.container_role` 用标题锚定唯一语义容器；执行/生成共用 container 描述符，不自动扩大到祖先或取首项。仅暴露描述显式引用的规则；label 排除内嵌表单控件文本，支持 placeholder 寻址。每轮保存源码与完整回放日志，失败时保留完成步骤最多的 spec。`tests/application-selection.spec.ts` 与 `tests/diagnostics.spec.ts` 覆盖现场结构及诊断保留。

@@ -67,6 +67,8 @@
 
 规则在生成时写入轨迹和脚本，**回放配置中的 rules 不会覆盖脚本里的规则**。修改定位规则后需要重新生成或编辑脚本；修改 params 后不需要重新生成。
 
+0.2.2 起，只把描述中显式引用的 `@规则名` 提供给探索工具和模型。配置里未引用的示例规则不参与定位，避免不存在的 scope 干扰正常操作。
+
 ## 2. SN 和包名
 
 推荐描述：
@@ -204,5 +206,11 @@ RDC 使用对应的单文件 RDC 用例，并把 `--ext` 改为 `rdc`。PB/RDC �
 参数目标支持最新快照中的控件名称（例如 `Device ${deviceSn}`），优先完整名称，部分名称必须唯一；存在歧义时提供含参数的完整名称或范围规则。推导出的 role/label 按完整名称精确匹配，禁止通过 nth 消除参数目标的歧义，避免 `SN-A` 与 `SN-A backup` 重排后误选。匹配到的定位器保留参数模板并验证命中同一元素。尚未出现在快照中的目标仍按完整文本等待；控件名称变化后可重新 get_page_state 再定位。ref 候选名称含样例值时会继续尝试稳定 testId 等候选，不会自动改成固定序号。
 
 每轮生成目录包含 `exploration_roundN.jsonl`，记录步骤、工具输入及输出（含页面状态）、模型文本和结束原因。失败摘要同时显示最近的工具错误/完成驳回。这些日志可能包含页面数据及参数样例，应按测试数据保管。详见[参数化生成排查](parameterized-exploration.md)。
+
+0.2.2 起，clean-replay 还保存完整的 `replay_roundN.log`，控制台显示错误摘要；每轮源码保存在 `test_generated.roundN.ts`（不自动作为额外测试收集）。最终失败时，`test_generated.spec.ts` 保留完成步骤最多的一轮，同进度取较新一轮；它仍是未通过回放的诊断产物。各轮源码与本目录的 `pwgen-runtime.ts` 一起保管。
+
+选择后校验当前值时，描述应指明已选区域，例如“在包含 Application to profile 标题的列表项中验证 `${packageName}`”。模型可调用 `assert_text({ target: "Application to profile", text: "${packageName}", container_role: "listitem" })`；生成的定位为 `getByRole('listitem').filter({ has: page.getByText('Application to profile', { exact: true }) })`。容器必须唯一，不会自动扩大到任意祖先或选第一个。支持的容器角色还有 `row`、`group`、`region`。省略 container_role 时保持原来的元素文本断言语义。
+
+参数化文本兜底只匹配可见节点，多个可见同名节点仍拒绝定位。搜索结果可见不能证明已经选中；应验证已选控件或包含标题的设置行。设备 select 的 label 不再混入 option 文本；输入框可直接用快照中展示的 placeholder 定位。
 
 规则范围、数量和可见性等待共享一个截止时间，不分别获得完整等待窗口。当前步骤未完成会丢弃当前会话，通过 `--max-repairs` 从新会话重探整个流程；不会在已改变的 UI 状态上重复该步骤。新会话仍不自动清空 Electron 的磁盘缓存。

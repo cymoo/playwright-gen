@@ -78,9 +78,13 @@ export function renderLocator(d: LocatorDescriptor, base = 'page', timeoutMs = 5
     case 'testId':
       expr = `${base}.getByTestId(${jsLit(d.testId)})`;
       break;
+    case 'container':
+      expr = `${base}.getByRole(${jsLit(d.role)}).filter({ has: ${base}.getByText(${jsLit(d.text)}, { exact: true }) })`;
+      break;
     case 'text': {
       const optStr = d.exact ? ', { exact: true }' : '';
       expr = `${base}.getByText(${jsLit(d.text)}${optStr})`;
+      if (d.visible) expr += '.filter({ visible: true })';
       break;
     }
     default: {

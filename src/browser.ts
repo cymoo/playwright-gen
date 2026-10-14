@@ -29,7 +29,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 import { paramText, resolveRule, waitRule, timeBudget, literalReferenceError, type Params, type Rule } from './runtime';
-import type { LocatorDescriptor, TargetSpec } from './trajectory';
+import type { ContainerRole, LocatorDescriptor, TargetSpec } from './trajectory';
 import { candidateDescriptors, type SnapshotItem } from './locators';
 
 const INTERACTIVE_SELECTOR =
@@ -71,12 +71,17 @@ function snapshotScript(sel: string): string {
     }
     return tag;
   };
+  const labelText = (label) => {
+    const copy = label.cloneNode(true);
+    copy.querySelectorAll('input,textarea,select,button').forEach(control => control.remove());
+    return (copy.textContent || '').trim();
+  };
   const nameOf = (el) => {
     const al = el.getAttribute('aria-label'); if (al) return al.trim();
     const lid = el.getAttribute('aria-labelledby');
     if (lid) { const r = document.getElementById(lid.split(' ')[0]); if (r) return (r.textContent || '').trim(); }
-    if (el.id) { try { const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (lbl) return (lbl.textContent || '').trim(); } catch (e) {} }
-    const wrap = el.closest('label'); if (wrap) return (wrap.textContent || '').trim();
+    if (el.id) { try { const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (lbl) return labelText(lbl); } catch (e) {} }
+    const wrap = el.closest('label'); if (wrap) return labelText(wrap);
     const tag = el.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return (el.getAttribute('placeholder') || '').trim();
     return (el.textContent || '').trim();
@@ -111,7 +116,7 @@ export class ResolveError extends Error {}
 function mapLocatorText(d: LocatorDescriptor, map: (text: string) => string): LocatorDescriptor {
   switch (d.kind) {
     case 'role': return d.name ? { ...d, name: map(d.name) } : d;
-    case 'label': case 'placeholder': case 'text': return { ...d, text: map(d.text) };
+    case 'label': case 'placeholder': case 'text': case 'container': return { ...d, text: map(d.text) };
     case 'testId': return { ...d, testId: map(d.testId) };
     case 'rule': return d;
   }
@@ -121,6 +126,7 @@ interface Ref {
   ref: string;
   role: string;
   name: string;
+  placeholder: string;
   candidates: LocatorDescriptor[];
 }
 
@@ -149,8 +155,12 @@ export function buildLocator(page: Page, d: LocatorDescriptor): Locator {
     case 'testId':
       loc = page.getByTestId(d.testId);
       break;
+    case 'container':
+      loc = page.getByRole(d.role).filter({ has: page.getByText(d.text, { exact: true }) });
+      break;
     case 'text':
       loc = page.getByText(d.text, { exact: d.exact });
+      if (d.visible) loc = loc.filter({ visible: true });
       break;
     default: {
       const _never: never = d;
@@ -250,11 +260,12 @@ export class Session {
     const lines: string[] = [];
     items.forEach((it, i) => {
       const ref = `e${i + 1}`;
-      this.refs.set(ref, { ref, role: it.role || '', name: it.name || '', candidates: candidateDescriptors(it) });
+      this.refs.set(ref, { ref, role: it.role || '', name: it.name || '', placeholder: it.placeholder || '', candidates: candidateDescriptors(it) });
       const shown = it.name || it.placeholder || '(无名)';
       const checkable = it.role === 'checkbox' || it.role === 'radio' || it.role === 'switch';
       const state = checkable ? (it.checked ? ' [已选中]' : ' [未选中]') : '';
-      lines.push(`${ref}  ${it.role || ''}  "${shown}"${state}`);
+      const placeholder = it.placeholder && it.placeholder !== shown ? ` [placeholder: "${it.placeholder}"]` : '';
+      lines.push(`${ref}  ${it.role || ''}  "${shown}"${state}${placeholder}`);
     });
     let aria = await this.page.locator('body').ariaSnapshot();
     if (aria.length > 3000) aria = aria.slice(0, 3000) + '\n…(ARIA 已截断)';
@@ -279,7 +290,7 @@ export class Session {
 
   /** 校验/修复 guess 描述符,使其唯一命中 data-pwref=ref 的元素;不行返回 null。 */
   private async faithfulDescriptor(ref: string, guess: LocatorDescriptor): Promise<LocatorDescriptor | null> {
-    if (guess.kind === 'rule') return null;
+    if (guess.kind === 'rule' || guess.kind === 'container') return null;
     if (await elementIsRef(buildLocator(this.page, guess), ref)) return guess;
     // 据 Playwright 自己的枚举修复 nth(对齐真实序号,消除手写 accname 近似导致的偏差)
     const base = buildLocator(this.page, { ...guess, nth: undefined } as LocatorDescriptor);
@@ -329,9 +340,25 @@ export class Session {
           if (await elementIsRef(locator, r.ref)) return { locator, descriptor };
         }
       }
-      const descriptor: LocatorDescriptor = { kind: 'text', text: t, exact: true };
-      const locator = this.page.getByText(value, { exact: true });
-      await expect(locator).toHaveCount(1, { timeout });
+      const descriptor: LocatorDescriptor = { kind: 'text', text: t, exact: true, visible: true };
+      const locator = buildLocator(this.page, { ...descriptor, text: value });
+      try {
+        await expect(locator).toHaveCount(1, { timeout });
+      } catch (error) {
+        const count = await locator.count();
+        if (count > 1) {
+          const contexts = await locator.evaluateAll(elements => elements.slice(0, 3).map(el => {
+            const context = el.closest('[data-testid],[id],[role]');
+            return {
+              tag: el.tagName.toLowerCase(),
+              ref: el.getAttribute('data-pwref'),
+              context: context?.outerHTML.slice(0, 100),
+            };
+          }));
+          throw new ResolveError(`参数目标 ${t} 有 ${count} 个可见匹配。请对已选控件做 assert_text，或用 target=设置行标题、container_role=listitem/row 验证整行；不能把搜索结果可见当作已选中。候选: ${JSON.stringify(contexts)}`);
+        }
+        throw error;
+      }
       return { locator, descriptor };
     }
 
@@ -341,7 +368,9 @@ export class Session {
       ref = t;
     } else {
       const low = t.toLowerCase();
-      const matches = [...this.refs.values()].filter((r) => low && (r.name || '').toLowerCase().includes(low));
+      const refs = [...this.refs.values()];
+      const exact = refs.filter(r => low && [r.name, r.placeholder].some(s => s.toLowerCase() === low));
+      const matches = exact.length ? exact : refs.filter(r => low && [r.name, r.placeholder].some(s => s.toLowerCase().includes(low)));
       if (matches.length === 1) ref = matches[0].ref;
       else if (matches.length > 1) {
         const cands = matches.map((m) => `${m.ref}("${m.name}")`).join(', ');
@@ -489,7 +518,18 @@ export class Session {
     return descriptor;
   }
 
-  async assertText(target: string, text: string): Promise<LocatorDescriptor> {
+  async assertText(target: string, text: string, containerRole?: ContainerRole): Promise<LocatorDescriptor> {
+    if (containerRole) {
+      if (!target.trim() || /^(?:e\d+|@[A-Za-z_]\w*)$/.test(target.trim())) throw new ResolveError('container_role 的 target 必须是行内标题文本，不是空值、ref 或 @规则');
+      const error = literalReferenceError(target, this.opts.params ?? {});
+      if (error) throw new ResolveError(error);
+      const descriptor: LocatorDescriptor = { kind: 'container', role: containerRole, text: target.trim() };
+      const locator = buildLocator(this.page, mapLocatorText(descriptor, t => paramText(t, this.opts.params ?? {})));
+      const remaining = timeBudget(ASSERT_TIMEOUT);
+      await expect(locator, `包含标题 ${target} 的 ${containerRole} 必须唯一`).toHaveCount(1, { timeout: remaining() });
+      await expect(locator).toContainText(paramText(text, this.opts.params ?? {}), { timeout: remaining() });
+      return descriptor;
+    }
     const { locator, descriptor } = await this.resolve(target);
     await expect(locator).toContainText(paramText(text, this.opts.params ?? {}), { timeout: ASSERT_TIMEOUT });
     return descriptor;

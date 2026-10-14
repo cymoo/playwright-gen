@@ -10,6 +10,7 @@
  * 动作分进 test.step() 块。
  */
 
+export type ContainerRole = 'listitem' | 'row' | 'group' | 'region';
 /** 一个"如何唯一定位到某元素"的结构化描述,与目标(web/electron)无关。 */
 export type LocatorDescriptor =
   | { kind: 'rule'; rule: import('./runtime').Rule; nth?: never }
@@ -17,7 +18,8 @@ export type LocatorDescriptor =
   | { kind: 'label'; text: string; exact?: boolean; nth?: number }
   | { kind: 'placeholder'; text: string; nth?: number }
   | { kind: 'testId'; testId: string; nth?: number }
-  | { kind: 'text'; text: string; exact?: boolean; nth?: number };
+  | { kind: 'container'; role: ContainerRole; text: string; nth?: never }
+  | { kind: 'text'; text: string; exact?: boolean; visible?: true; nth?: number };
 
 /**
  * 一条轨迹步骤(判别联合)。assertVisible 的 timeoutMs 用于 wait_for 的长等待。

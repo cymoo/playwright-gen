@@ -16,6 +16,11 @@ export interface ReuseConfig { params: Params; rules: Record<string, Rule> }
 export function loadConfig(path?: string): ReuseConfig {
   return schema.parse(path ? JSON.parse(readFileSync(path, 'utf8')) : {});
 }
+/** Only explicit @aliases authorize rule use; unrelated example scopes must not guide exploration. */
+export function configForDescription(description: string, config: ReuseConfig): ReuseConfig {
+  const names = new Set([...description.matchAll(/(?<![\w.+-])@([A-Za-z_]\w*)/g)].map(m => m[1]));
+  return { params: config.params, rules: Object.fromEntries(Object.entries(config.rules).filter(([name]) => names.has(name))) };
+}
 export function validateDescription(description: string, config: ReuseConfig): void {
   if ((Object.keys(config.params).length || Object.keys(config.rules).length) &&
       /遍历|循环|重复.{0,12}(?:次|遍)|如果|若|当[^。\n]{1,80}时/.test(description)) {
