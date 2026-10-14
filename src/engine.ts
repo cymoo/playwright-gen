@@ -12,7 +12,7 @@
  * 失败则带失败信息重新探索(verify → repair)。
  */
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
@@ -75,7 +75,7 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 
 工作循环:
 1. 观察:操作类工具的返回里附带最新页面状态(可交互元素 ref 列表 + ARIA 树);需要时可调 get_page_state 重新观察。
-2. 操作:click / click_and_save / fill / check / uncheck / select_option / hover / press_key / scroll。优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))。
+2. 操作:click / click_and_save / fill / check / uncheck / select_option / hover / press_key / scroll。普通控件优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))；设备/应用等参数目标必须用用户提供的参数占位符或含该占位符的完整名称，不要改用固定值或 ref。
 3. 等待:录制、加载、跳转等**耗时过程**,用 wait_for("<预期出现的文本>", timeout_seconds) 等待其完成,给足时间(如录制场景 120~300 秒)——不要反复 get_page_state 轮询,不要臆测已完成。
 4. 断言:用 assert_visible / assert_text / assert_url / assert_title 验证该步骤的预期结果;wait_for 等到目标也会作为断言记入用例。**这是测试的价值,不要只操作不断言**。
 5. 该步骤全部完成且预期已断言后,调用 step_done(summary) 并停止。
@@ -98,6 +98,7 @@ interface StepFlag {
   done: boolean;
   summary: string;
   rejects: number;
+  lastError?: string;
 }
 
 interface ToolCtx {
@@ -114,11 +115,16 @@ interface ToolCtx {
 
 export function makeTools(ctx: ToolCtx): ToolSet {
   const { session, traj } = ctx;
+  // Only rejected literal inputs require the same operation to be corrected.
+  // Ordinary tool failures may be recovered through a different tool (custom selects, etc.).
   const pendingFailures = new Set<string>();
+  const unrecoveredFailures = new Map<string, string>();
+  const actionTools = new Set(['click', 'click_and_save', 'fill', 'check', 'uncheck',
+    'select_option', 'hover', 'press_key', 'run_command', 'write_file']);
 
   const withState = async (msg: string) => `${msg}\n\n${await session.snapshot()}`;
   // 所有异常(定位失败/超时等)都转为文字反馈给模型,让它自纠而不是中断对话
-  const guard = async (fn: () => Promise<string>): Promise<string> => {
+  const guard = async <T>(fn: () => Promise<T>): Promise<T | string> => {
     try {
       return await fn();
     } catch (e) {
@@ -162,7 +168,7 @@ export function makeTools(ctx: ToolCtx): ToolSet {
           const abs = resolve(ctx.runDir, paramText(save_as, ctx.config.params));
           const rel = relative(resolve(ctx.runDir), abs);
           if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
-            return `save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
+            return `操作失败:save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
           }
           const d = await session.clickAndSave(target, abs, ms);
           const size = statSync(abs).size; // 先取 size 再记录,避免"已记录却报失败"的不一致
@@ -319,9 +325,9 @@ export function makeTools(ctx: ToolCtx): ToolSet {
         guard(async () => {
           const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
           const r = await execShell(paramCommand(command, ctx.config.params), { stdinLines: stdin_lines?.map(line => paramCommand(line, ctx.config.params)), timeoutMs: ms, cwd: ctx.runDir });
-          if (r.timedOut) return `命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
-          if (r.code === null) return `命令启动失败或被信号终止,未记录到用例。输出:\n${capOutput(r.output)}`;
-          if (r.code !== 0) return `命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
+          if (r.timedOut) return `操作失败:命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
+          if (r.code === null) return `操作失败:命令启动失败或被信号终止,未记录到用例。输出:\n${capOutput(r.output)}`;
+          if (r.code !== 0) return `操作失败:命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
           traj.add({ kind: 'runCommand', command, stdin: stdin_lines, timeoutMs: ms });
           return `命令成功(退出码 0),已记录到用例。输出:\n${capOutput(r.output)}`;
         }),
@@ -354,6 +360,10 @@ export function makeTools(ctx: ToolCtx): ToolSet {
       inputSchema: z.object({ summary: z.string() }),
       execute: async ({ summary }) => {
         if (pendingFailures.size) return `操作失败尚未修正，请重新正确执行: ${[...pendingFailures].join(', ')}`;
+        if (unrecoveredFailures.size) {
+          const failures = [...unrecoveredFailures].map(([name, error]) => `${name}: ${error.slice(0, 300)}`).join('; ');
+          return `普通工具失败尚未恢复: ${failures}。请成功执行替代操作；仅观察或断言不能代替失败的操作，失败的断言/读取可以重试自身。`;
+        }
         const delta = traj.since(ctx.mark);
         const refError = referenceError(ctx.description, delta, ctx.config);
         if (refError) return refError;
@@ -388,24 +398,36 @@ export function makeTools(ctx: ToolCtx): ToolSet {
   }
 
   for (const [name, configuredTool] of Object.entries(tools)) {
-    if (!configuredTool.execute || ['step_done', 'get_page_state', 'look'].includes(name)) continue;
+    if (!configuredTool.execute || ['get_page_state', 'look'].includes(name)) continue;
     const execute = configuredTool.execute;
-    configuredTool.execute = (input, options) => {
+    configuredTool.execute = async (input, options) => {
       // Ref/alias handles are validated through the resolved descriptor, not their spelling.
       const args = { ...input };
       if (typeof args.target === 'string' && /^(?:e\d+|@[A-Za-z_]\w*)$/.test(args.target)) delete args.target;
-      const error = literalReferenceError(args, ctx.config.params);
+      const error = name === 'step_done' ? undefined : literalReferenceError(args, ctx.config.params);
       if (error) {
         pendingFailures.add(name);
-        return Promise.resolve(`操作失败:${error}`);
+        ctx.flag.lastError = `${name}: ${error}`;
+        return `操作失败:${error}`;
       }
-      return Promise.resolve(execute(input, options)).then(result => {
-        if (typeof result === 'string') {
-          if (result.startsWith('操作失败:')) pendingFailures.add(name);
-          else pendingFailures.delete(name);
+      const mark = traj.steps.length;
+      const result = await guard(async () => execute(input, options));
+      if (typeof result === 'string') {
+        if (result.startsWith('操作失败:')) {
+          ctx.flag.lastError = `${name}: ${result}`;
+          unrecoveredFailures.set(name, result);
+        } else if (name === 'step_done' && !ctx.flag.done) {
+          ctx.flag.lastError = `${name}: ${result}`;
+        } else {
+          pendingFailures.delete(name);
+          // Only a successful, recorded action can recover another tool's failure.
+          // Retrying an assertion/read may recover itself, but never a failed action.
+          if (actionTools.has(name) && traj.since(mark).some(s => !s.kind.startsWith('assert'))) {
+            unrecoveredFailures.clear();
+          } else unrecoveredFailures.delete(name);
         }
-        return result;
-      });
+      }
+      return result;
     };
   }
   return tools;
@@ -465,6 +487,9 @@ async function explore(
   const headless = !opts.headed;
   const budget = opts.maxSteps ?? envMaxSteps();
   const tracePath = opts.trace ? join(runDir, `trace_round${round}.zip`) : undefined;
+  const diagnosticPath = join(runDir, `exploration_round${round}.jsonl`);
+  writeFileSync(diagnosticPath, '', 'utf8');
+  console.log(`  [诊断] 工具调用与结果: ${diagnosticPath}`);
   const config = opts.config ?? loadConfig();
   const session = new Session(opts.target, { headless, slowMo: headless ? 0 : 500, tracePath, ...config });
 
@@ -503,14 +528,18 @@ async function explore(
       await generateText({
         model: deepseekModel(),
         system: AGENT_SYSTEM + `
-复用约定:用户的参数占位符必须原样传给工具，不得替换为样例值；@规则名必须原样作为 target，禁止改用 ref 或当次编号。参数 ${JSON.stringify(config.params)}；规则 ${JSON.stringify(config.rules)}。不支持自动循环和条件分支；用户需拆成明确步骤或独立场景，目录遍历由 replay 命令处理。`,
+复用约定:用户的参数占位符必须原样传给工具，不得替换为样例值；@规则名必须原样作为 target，禁止改用 ref 或当次编号。参数 ${JSON.stringify(config.params)}；规则 ${JSON.stringify(config.rules)}。未在描述中引用的规则不要求使用，规则的 scope 必须真实存在，不能假定示例选择器就是当前页面结构。不支持自动循环和条件分支；用户需拆成明确步骤或独立场景，目录遍历由 replay 命令处理。`,
         prompt: buildStepPrompt(plan, i, summaries, state, hints),
         tools,
         stopWhen: [stepCountIs(budget), () => flag.done],
+        onStepFinish: ({ toolCalls, toolResults, text, finishReason }) => {
+          appendFileSync(diagnosticPath, JSON.stringify({ step: step.title, toolCalls, toolResults, text, finishReason }) + '\n', 'utf8');
+        },
       });
 
       if (!flag.done) {
-        return { traj, summaries, failed: { index: i, reason: '本次步骤未完成；丢弃会话，通过 --max-repairs 从新会话重新探索' } };
+        const detail = flag.lastError ? `最近一次工具错误/完成驳回: ${flag.lastError}` : '模型未调用有效的 step_done';
+        return { traj, summaries, failed: { index: i, reason: `本次步骤未完成（预算 ${budget} 轮）；${detail}；丢弃会话，通过 --max-repairs 从新会话重新探索` } };
       }
       summaries.push(flag.summary || '(已完成)');
       console.log(`    ✓ ${flag.summary.slice(0, 80)}`);
