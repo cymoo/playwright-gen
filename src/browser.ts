@@ -369,8 +369,13 @@ export class Session {
     } else {
       const low = t.toLowerCase();
       const refs = [...this.refs.values()];
-      const exact = refs.filter(r => low && [r.name, r.placeholder].some(s => s.toLowerCase() === low));
-      const matches = exact.length ? exact : refs.filter(r => low && [r.name, r.placeholder].some(s => s.toLowerCase().includes(low)));
+      const matchBy = (field: 'name' | 'placeholder') => {
+        const exact = refs.filter(r => low && r[field].toLowerCase() === low);
+        return exact.length ? exact : refs.filter(r => low && r[field].toLowerCase().includes(low));
+      };
+      // Preserve name matching (including ambiguity) before trying placeholder fallback.
+      const names = matchBy('name');
+      const matches = names.length ? names : matchBy('placeholder');
       if (matches.length === 1) ref = matches[0].ref;
       else if (matches.length > 1) {
         const cands = matches.map((m) => `${m.ref}("${m.name}")`).join(', ');

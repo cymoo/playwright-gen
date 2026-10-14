@@ -11,7 +11,7 @@
 | `assert_text("Application to profile", "${vkPackageName}")` 收到的文本只有标题 | `getByText` 命中标题 div，包名在相邻节点 | 新增显式 `container_role: "listitem"`，定位唯一包含标题的列表项并验证内容；不会自动扩大到祖先 |
 | 全页精确包名匹配返回 2 | 已选摘要与搜索结果都可见 | 提示验证已选区域，拒绝任选第一项；搜索到但没有选中仍不能通过 |
 | 设备下拉框已传 `${deviceSn}` 仍报写死样例值 | 手写快照名称把 label 内的 select 选项串进了名称 | 提取 label 文本时排除内嵌表单控件，再以 Playwright 校验实际目标 |
-| `fill("Click to search", …)` 找不到，ref 填写却成功 | 寻址只比较名称，漏掉已有 placeholder | 同时匹配 placeholder，快照展示该提示 |
+| `fill("Click to search", …)` 找不到，ref 填写却成功 | 寻址只比较名称，漏掉已有 placeholder | 无名称匹配时回退到 placeholder，快照展示该提示 |
 | `@device` 的 record-panel 范围不存在 | 未引用的示例规则仍暴露给模型，诱导其尝试 | 只暴露描述明确引用的规则；不要把示例选择器当作真实 DOM |
 | 首次只显示“回放失败”，随后短脚本覆盖完整脚本 | 错误摘要和各轮产物未保存完整 | 显示回放错误，保存完整日志和各轮源码，保留进度最多的主 spec |
 

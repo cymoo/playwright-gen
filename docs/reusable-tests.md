@@ -211,6 +211,6 @@ RDC 使用对应的单文件 RDC 用例，并把 `--ext` 改为 `rdc`。PB/RDC �
 
 选择后校验当前值时，描述应指明已选区域，例如“在包含 Application to profile 标题的列表项中验证 `${packageName}`”。模型可调用 `assert_text({ target: "Application to profile", text: "${packageName}", container_role: "listitem" })`；生成的定位为 `getByRole('listitem').filter({ has: page.getByText('Application to profile', { exact: true }) })`。容器必须唯一，不会自动扩大到任意祖先或选第一个。支持的容器角色还有 `row`、`group`、`region`。省略 container_role 时保持原来的元素文本断言语义。
 
-参数化文本兜底只匹配可见节点，多个可见同名节点仍拒绝定位。搜索结果可见不能证明已经选中；应验证已选控件或包含标题的设置行。设备 select 的 label 不再混入 option 文本；输入框可直接用快照中展示的 placeholder 定位。
+参数化文本兜底只匹配可见节点，多个可见同名节点仍拒绝定位。搜索结果可见不能证明已经选中；应验证已选控件或包含标题的设置行。设备 select 的 label 不再混入 option 文本；普通文本目标先匹配控件名称，无名称匹配时才使用快照中的 placeholder。两层各自精确优先、其次部分匹配；名称歧义不会回退到 placeholder，以免选错控件。
 
 规则范围、数量和可见性等待共享一个截止时间，不分别获得完整等待窗口。当前步骤未完成会丢弃当前会话，通过 `--max-repairs` 从新会话重探整个流程；不会在已改变的 UI 状态上重复该步骤。新会话仍不自动清空 Electron 的磁盘缓存。
