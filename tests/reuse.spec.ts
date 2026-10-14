@@ -12,6 +12,46 @@ import { Session } from '../src/browser';
 
 const rule: Rule = { scope: '#resources', role: 'button', text: 'Buffer', match: 'numberSuffix', pick: 'unique' };
 
+test('参数文本忽略隐藏的同名下拉项，生成脚本换参后保持可见性筛选', async ({ page }) => {
+  test.setTimeout(60000);
+  const { runPlaywright } = await import('../src/runner');
+  const root = join(process.cwd(), 'output'); mkdirSync(root, { recursive: true });
+  const dir = mkdtempSync(join(root, 'reuse-visible-'));
+  const fixture = (pkg: string) => `<div hidden><p>${pkg}</p></div><section data-testid="selected-app"><p>${pkg}</p></section>`;
+  try {
+    const html = join(dir, 'fixture.html');
+    writeFileSync(html, fixture('com.example.vulkan'));
+    const session = new Session({ mode: 'web', url: pathToFileURL(html).href }, { headless: true, params: { pkg: 'com.example.vulkan' } });
+    session.page = page;
+    await session.goto(pathToFileURL(html).href);
+    const { descriptor } = await session.resolve('${pkg}', 150);
+    expect(descriptor).toEqual({ kind: 'text', text: '${pkg}', exact: true, visible: true });
+    const traj = new Trajectory();
+    traj.add({ kind: 'goto', url: pathToFileURL(html).href });
+    traj.add({ kind: 'assertText', target: await session.assertText('${pkg}', '${pkg}'), text: '${pkg}' });
+    const spec = join(dir, 'visible.spec.ts');
+    writeFileSync(spec, renderTest(traj, { testName: 'visible', description: '', target: { mode: 'web', url: '' } }));
+    writeRuntime(dir);
+    writeFileSync(html, fixture('com.other.gles'));
+    const result = await runPlaywright(spec, 25000, { pkg: 'com.other.gles' });
+    expect(result.passed, result.output).toBe(true);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('两个可见同名包名仍拒绝猜测，并能通过已选应用范围验证身份', async ({ page }) => {
+  const selected: Rule = { scope: '[data-testid="selected-app"]', text: '${pkg}', match: 'exact', pick: 'unique' };
+  const session = new Session({ mode: 'web', url: 'about:blank' }, {
+    headless: true, params: { pkg: 'com.example.vulkan' }, rules: { selected },
+  });
+  session.page = page;
+  await page.setContent('<section data-testid="selected-app"><p>com.example.vulkan</p></section><section data-testid="search-results"><p>com.example.vulkan</p></section>');
+  await expect(session.resolve('${pkg}', 150)).rejects.toThrow('2 个可见');
+  await expect(session.resolve('${pkg}', 150)).rejects.toThrow('selected-app');
+  expect(await session.assertText('@selected', '${pkg}')).toEqual({ kind: 'rule', rule: selected });
+  await page.getByTestId('selected-app').evaluate(el => { el.textContent = 'com.other.gles'; });
+  await expect(session.resolve('@selected', 150)).rejects.toThrow();
+});
+
 test('参数目标可按控件名称定位，并保留完整名称中的参数引用', async ({ page }) => {
   await page.setContent('<button aria-label="Device SN-A">连接</button>');
   const session = new Session({ mode: 'web', url: 'about:blank' }, { headless: true, params: { deviceSn: 'SN-A' } });
@@ -278,7 +318,7 @@ test('Session 参数和规则记录保持符号引用', async ({ page }) => {
   const session = new Session({ mode: 'web', url: 'about:blank' }, { headless: true, params: { packageName: 'new.package', sn: 'new-sn' }, rules: { buffer: rule } });
   session.page = page;
   expect(await session.click('@buffer')).toEqual({ kind: 'rule', rule });
-  expect(await session.assertVisible('${packageName}')).toEqual({ kind: 'text', text: '${packageName}', exact: true });
+  expect(await session.assertVisible('${packageName}')).toEqual({ kind: 'text', text: '${packageName}', exact: true, visible: true });
   await session.snapshot();
   await session.fill('SN', '${sn}');
   await expect(page.getByLabel('SN')).toHaveValue('new-sn');

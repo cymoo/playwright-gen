@@ -18,7 +18,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { generateText, stepCountIs, tool, type ToolSet } from 'ai';
 import { z } from 'zod';
 
-import { loadConfig, validateDescription, referenceError, writeRuntime, type ReuseConfig } from './config';
+import { loadConfig, configForDescription, validateDescription, referenceError, writeRuntime, type ReuseConfig } from './config';
 import { paramText, paramCommand, literalReferenceError } from './runtime';
 import { Session } from './browser';
 import { computeTimeout, renderTest } from './codegen';
@@ -88,6 +88,7 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 - **保存/导出/下载文件的按钮用 click_and_save**(指定保存文件名),不要用 click:下载产物和操作系统的原生保存对话框都不在页面里,普通 click 拿不到文件;click_and_save 会自动接住下载/原生对话框并把文件落到指定路径,文件真实生成才算成功——它同时就是该步骤"文件已保存"的验证。不要尝试与原生保存对话框交互。
 - 若提示"未找到 / 匹配多个 / 无法唯一定位",先 get_page_state 看最新 ref,再改用具体 ref 或更精确的名称。
 - 下拉选择用 select_option;若它不适用(自定义下拉),点击展开后再点击选项。
+- 选择应用/设备后，断言应定位到已选控件或明确的已选区域，再验证其中包含参数值；不要仅在全页面搜索同一包名来证明选择成功。ARIA 中若显示 listitem/row 内包含标题和当前值，使用 assert_text(target=标题, text=参数引用, container_role="listitem" 或 "row") 验证整行；标题本身不包含旁边的当前值。不要重复同一歧义断言或随意取第一项。
 - 操作失败会返回失败原因,依据它调整策略:换更精确的目标、先 wait_for 等待、或改用其他操作。
 - 禁止任何形式的硬等待/轮询;需要等待就用 wait_for(它会连同超时记入用例)。
 - 本地环境工具:run_command 执行 shell 命令(交互式 CLI 用 stdin_lines 逐行输入,如 hdc shell);write_file 写入本地文件;read_file 读取文件内容用于观察(不记入用例)。run_command 与 write_file 成功后会记入用例并在回放时原样重放。仅在步骤明确要求命令行/文件操作时使用,UI 上能完成的操作必须在 UI 上做。`;
@@ -277,11 +278,11 @@ export function makeTools(ctx: ToolCtx): ToolSet {
     }),
 
     assert_text: tool({
-      description: '断言某元素包含指定文本(会记入最终用例)。',
-      inputSchema: z.object({ target: z.string(), text: z.string() }),
-      execute: async ({ target, text }) =>
+      description: '断言某元素包含指定文本(会记入最终用例)。若要验证设置行/列表项的当前值，可用 container_role 指定 ARIA 容器角色，target 填该行内的标题文本；在唯一包含该标题的容器中验证 text，避免只定位到标题或全页面的同名搜索结果。',
+      inputSchema: z.object({ target: z.string(), text: z.string(), container_role: z.enum(['listitem', 'row', 'group', 'region']).optional() }),
+      execute: async ({ target, text, container_role }) =>
         guard(async () => {
-          const d = await session.assertText(target, text);
+          const d = await session.assertText(target, text, container_role);
           traj.add({ kind: 'assertText', target: d, text });
           return `断言通过:${target} 含文本 "${text}"。`;
         }),
@@ -490,7 +491,7 @@ async function explore(
   const diagnosticPath = join(runDir, `exploration_round${round}.jsonl`);
   writeFileSync(diagnosticPath, '', 'utf8');
   console.log(`  [诊断] 工具调用与结果: ${diagnosticPath}`);
-  const config = opts.config ?? loadConfig();
+  const config = configForDescription(opts.description, opts.config ?? loadConfig());
   const session = new Session(opts.target, { headless, slowMo: headless ? 0 : 500, tracePath, ...config });
 
   const traj = new Trajectory();
@@ -528,7 +529,7 @@ async function explore(
       await generateText({
         model: deepseekModel(),
         system: AGENT_SYSTEM + `
-复用约定:用户的参数占位符必须原样传给工具，不得替换为样例值；@规则名必须原样作为 target，禁止改用 ref 或当次编号。参数 ${JSON.stringify(config.params)}；规则 ${JSON.stringify(config.rules)}。未在描述中引用的规则不要求使用，规则的 scope 必须真实存在，不能假定示例选择器就是当前页面结构。不支持自动循环和条件分支；用户需拆成明确步骤或独立场景，目录遍历由 replay 命令处理。`,
+复用约定:用户的参数占位符必须原样传给工具，不得替换为样例值；@规则名必须原样作为 target，禁止改用 ref 或当次编号。参数 ${JSON.stringify(config.params)}；描述明确引用的规则 ${JSON.stringify(config.rules)}。只可使用这些规则，规则的 scope 必须真实存在，不能假定示例选择器就是当前页面结构。不支持自动循环和条件分支；用户需拆成明确步骤或独立场景，目录遍历由 replay 命令处理。`,
         prompt: buildStepPrompt(plan, i, summaries, state, hints),
         tools,
         stopWhen: [stepCountIs(budget), () => flag.done],
@@ -565,7 +566,7 @@ export interface RunOpts {
   config?: ReuseConfig;
 }
 
-export async function run(opts: RunOpts): Promise<void> {
+export async function run(opts: RunOpts, dependencies: { explore?: typeof explore } = {}): Promise<void> {
   const config = opts.config ?? loadConfig();
   validateDescription(opts.description, config);
   if (JSON.stringify(opts.target).includes('${')) throw new Error('入口 URL/应用路径暂不支持参数占位符，请直接通过 --url/--electron-bin 提供');
@@ -585,12 +586,13 @@ export async function run(opts: RunOpts): Promise<void> {
   let replayHint: string | undefined;
   let lastFailure = '';
   let wrote = false;
+  let bestProgress = -1;
 
   for (let round = 1; round <= rounds; round++) {
     console.log(`\n[探索] 第 ${round}/${rounds} 轮`);
     let ex: ExploreResult;
     try {
-      ex = await explore(opts, plan, runDir, round, replayHint);
+      ex = await (dependencies.explore ?? explore)(opts, plan, runDir, round, replayHint);
     } catch (e) {
       lastFailure = `探索异常:${String(e)}`;
       replayHint = lastFailure;
@@ -598,8 +600,14 @@ export async function run(opts: RunOpts): Promise<void> {
       continue;
     }
 
-    // 无论成败都写出当前最好的一版,便于查看/调试
-    writeFileSync(testPath, renderTest(ex.traj, { testName, description: opts.description, target: opts.target }), 'utf-8');
+    // Archive every attempt without Playwright's .spec suffix; a failed repair must
+    // not overwrite a more complete earlier attempt or be collected as another test.
+    const code = renderTest(ex.traj, { testName, description: opts.description, target: opts.target });
+    writeFileSync(join(runDir, `test_generated.round${round}.ts`), code, 'utf8');
+    if (ex.summaries.length >= bestProgress) {
+      writeFileSync(testPath, code, 'utf8');
+      bestProgress = ex.summaries.length;
+    }
     wrote = true;
 
     if (ex.failed) {
@@ -613,22 +621,25 @@ export async function run(opts: RunOpts): Promise<void> {
     const refError = referenceError(opts.description, ex.traj.steps, config);
     if (refError) { replayHint = lastFailure = refError; continue; }
 
-    console.log('[回放] 用全新上下文运行生成的用例…');
-    const { passed, output } = await runPlaywright(testPath, computeTimeout(ex.traj) + 60_000, config.params);
+    console.log(opts.target.mode === 'electron'
+      ? '[回放] 重新启动应用运行生成的用例（保留应用磁盘状态）…'
+      : '[回放] 用全新上下文运行生成的用例…');
+    const replayLog = join(runDir, `replay_round${round}.log`);
+    const { passed, output } = await runPlaywright(testPath, computeTimeout(ex.traj) + 60_000, config.params, replayLog);
     if (passed) {
       console.log(`\n✅ 全部 ${plan.steps.length} 个步骤完成,clean-replay 通过 → ${testPath}`);
       ex.summaries.forEach((s, i) => console.log(`  ${plan.steps[i].title}: ${s}`));
       return;
     }
-    lastFailure = `clean-replay 失败:\n${output.slice(-1200)}`;
-    replayHint = `上一轮生成的用例在干净回放时失败(探索时成功但重放不稳定)。本轮请优先选更稳定的定位/断言,耗时过程用 wait_for 并给足超时。失败日志:\n${output.slice(-1200)}`;
-    console.log('  ✗ 回放失败');
+    lastFailure = `clean-replay 失败:\n${output}`;
+    replayHint = `上一轮生成的用例在干净回放时失败(探索时成功但重放不稳定)。本轮请优先选更稳定的定位/断言,耗时过程用 wait_for 并给足超时。${lastFailure}`;
+    console.log(`  ✗ ${lastFailure}\n  [诊断] 完整回放日志: ${replayLog}`);
   }
 
   process.exitCode = 1;
   console.log(
     wrote
-      ? `\n❌ ${rounds} 轮内未能生成完整通过的用例。最后一版已写入:${testPath}`
+      ? `\n❌ ${rounds} 轮内未能生成完整通过的用例。已保留进度最多的一版(未通过回放):${testPath}；各轮源码见 test_generated.roundN.ts。`
       : `\n❌ ${rounds} 轮内未能生成用例(探索未产生轨迹)。`,
   );
   if (lastFailure) console.log(`\n${lastFailure}`);

@@ -9,7 +9,7 @@
 
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 const RUN_CONFIG = `import { defineConfig } from '@playwright/test';
@@ -31,13 +31,14 @@ export interface RunResult {
   output: string;
 }
 
-export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Record<string, string> = {}): Promise<RunResult> {
+export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Record<string, string> = {}, logPath?: string): Promise<RunResult> {
   const dir = dirname(specFile);
   const base = basename(specFile).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
   ensureRunConfig(dir);
   const packagePath = createRequire(import.meta.url).resolve('@playwright/test/package.json');
   const metadata = JSON.parse(readFileSync(packagePath, 'utf8')) as { bin: { playwright: string } };
   const cliPath = join(dirname(packagePath), metadata.bin.playwright);
+  if (logPath) writeFileSync(logPath, '', 'utf8');
 
   return new Promise((resolve) => {
     let timedOut = false;
@@ -48,8 +49,12 @@ export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Rec
       { cwd: dir, env: { ...process.env, PWGEN_PARAMS: JSON.stringify(params) }, detached: process.platform !== 'win32' },
     );
     let out = '';
+    const collect = (text: string) => {
+      out += text;
+      if (logPath) appendFileSync(logPath, text, 'utf8');
+    };
     const timer = setTimeout(() => {
-      out += `\n[playwright 超时,超过 ${timeoutMs}ms]`;
+      collect(`\n[playwright 超时,超过 ${timeoutMs}ms]`);
       timedOut = true;
       if (child.pid && process.platform === 'win32') {
         const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f']);
@@ -58,15 +63,16 @@ export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Rec
         try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
       }
     }, timeoutMs);
-    child.stdout.on('data', (d) => (out += d.toString()));
-    child.stderr.on('data', (d) => (out += d.toString()));
+    child.stdout.on('data', (d) => collect(d.toString()));
+    child.stderr.on('data', (d) => collect(d.toString()));
     child.on('close', (code) => {
       clearTimeout(timer);
       resolve({ passed: !timedOut && code === 0, output: trimOutput(out) });
     });
     child.on('error', (e) => {
       clearTimeout(timer);
-      resolve({ passed: false, output: `启动 playwright 失败:${String(e)}` });
+      collect(`启动 playwright 失败:${String(e)}`);
+      resolve({ passed: false, output: trimOutput(out) });
     });
   });
 }

@@ -1,6 +1,43 @@
 # 加入参数后生成卡住：定位与处理
 
-## 截图能确认什么
+## 后续工具日志确认的问题（0.2.2 修复）
+
+用户在 0.2.1 上首次探索完成六步但回放失败，第二轮在步骤1耗尽预算。第二轮完整工具日志已经确认：**包名参数替换正常，应用选择也成功，失败的是定位和断言范围**。
+
+点击 `${vkPackageName}` 后，ARIA 中 `Application to profile` 所在 listitem 的当前值已经从原 GLES 应用变为目标 Vulkan 包名；搜索结果中的 strong 节点也保留该包名。因此两个匹配分别位于已选摘要和搜索结果，不能仅通过过滤隐藏节点解决。
+
+| 日志现象 | 原因 | 0.2.2 处理 |
+| --- | --- | --- |
+| `assert_text("Application to profile", "${vkPackageName}")` 收到的文本只有标题 | `getByText` 命中标题 div，包名在相邻节点 | 新增显式 `container_role: "listitem"`，定位唯一包含标题的列表项并验证内容；不会自动扩大到祖先 |
+| 全页精确包名匹配返回 2 | 已选摘要与搜索结果都可见 | 提示验证已选区域，拒绝任选第一项；搜索到但没有选中仍不能通过 |
+| 设备下拉框已传 `${deviceSn}` 仍报写死样例值 | 手写快照名称把 label 内的 select 选项串进了名称 | 提取 label 文本时排除内嵌表单控件，再以 Playwright 校验实际目标 |
+| `fill("Click to search", …)` 找不到，ref 填写却成功 | 寻址只比较名称，漏掉已有 placeholder | 无名称匹配时回退到 placeholder，快照展示该提示 |
+| `@device` 的 record-panel 范围不存在 | 未引用的示例规则仍暴露给模型，诱导其尝试 | 只暴露描述明确引用的规则；不要把示例选择器当作真实 DOM |
+| 首次只显示“回放失败”，随后短脚本覆盖完整脚本 | 错误摘要和各轮产物未保存完整 | 显示回放错误，保存完整日志和各轮源码，保留进度最多的主 spec |
+
+第一次回放的具体错误栈尚未提供，不能仅凭第二轮日志断言两次失败完全同源。重新启动 Electron 也不自动清空磁盘状态；日志中重新连接后仍出现上次的 GLES 应用。因此步骤应明确设置和验证目标状态，不能假定每次启动都没有已选应用。
+
+## 当前建议
+
+使用 0.2.2 重新生成，并先用下方最小配置，仅保留三个参数。将第一步写清楚：
+
+```text
+步骤1：点击 Record trace，在 Target device 选择 ${deviceSn}，等待 Application to profile 出现。在应用搜索框 Click to search 输入 ${vkPackageName}，等待搜索结果后选择对应应用。在包含标题 Application to profile 的列表项内验证当前所选包名为 ${vkPackageName}。
+```
+
+模型对应的验证工具输入为：
+
+```json
+{"target":"Application to profile","text":"${vkPackageName}","container_role":"listitem"}
+```
+
+第5步选择 GLES 应用时也采用相同的列表项验证，将参数改为 `${glPackageName}`。这里的角色和标题来自用户提供的 ARIA；不要照搬未出现的 testid。
+
+若仍失败，优先查看 `replay_round1.log` 中的具体失败行，并与 `test_generated.round1.ts`、`exploration_round1.jsonl` 对照。每轮源文件都保留；最后失败的 `test_generated.spec.ts` 保存完成步骤最多的一轮，但不代表已通过回放。不要用增加尝试次数代替修正定位范围。
+
+本地回归使用同类 DOM：标题和值为兄弟节点，选择后搜索结果仍可见。测试覆盖实际工具调用、生成脚本换设备/包名回放，以及“只搜索到却未选中”和“重复标题多行”的失败检查。尚未验证真实 Windows Graphics Profiler、设备与完整六步录制。
+
+## 最初截图能确认什么
 
 失败发生在第 1 步的探索阶段，尚未进入 clean-replay。程序已经读入配置、保留 `${deviceSn}` 等引用并拆分出 6 步，所以当前证据不支持把问题归因于 JSON 语法或 shell 吞掉 `$`。日志里的占位符是有意保留的；实际操作时才用配置求值。
 
@@ -15,11 +52,11 @@
 | 所有工具失败都按工具名挂起，必须同名工具成功才能完成步骤 | 自定义下拉框先 select_option 失败，再 click 成功，仍被 step_done 要求重新执行 select_option | 普通操作失败允许换工具恢复，但必须成功记录替代操作；仅断言/观察不能跳过；写死参数值的拒绝仍须纠正，必需断言仍须满足 |
 | 失败日志隐藏工具错误与完成驳回 | 看起来一直卡着，最后只剩重试耗尽 | 保存每轮工具日志，并在失败摘要显示具体错误 |
 
-这里的复现使用本地真实 Chromium 与工具调用测试，没有用户的 Windows Graphics Profiler 二进制、设备和原始工具日志。可以确认代码缺陷，不能声称已经验证该用户的完整六步 Electron 录制流程。
+以上是最初截图阶段的复现，使用本地真实 Chromium 与工具调用测试。后续工具日志揭示的额外问题见上文；仓库没有用户的 Windows Graphics Profiler 二进制和设备。
 
 ## 现场先做这几步
 
-1. 使用 0.2.1 修复代码，先生成“连接设备、选择 Vulkan 应用”两个步骤，确认通过后再加入录制。不要先提高 MAX_STEPS 或 max-repairs；定位不匹配和完成校验死锁不会因此消失。
+1. 使用 0.2.2 修复代码，先验证连接设备和选择 Vulkan 应用，确认通过后再加入录制。不要先提高 MAX_STEPS 或 max-repairs；定位不匹配不会因此消失。
 2. 配置先只保留三个实际参数。删除未使用的 inputFile/inputName 和示例 rules，以减少干扰。未在描述中使用 `@device` 不代表会自动应用该规则；示例 `[data-testid='record-panel']` 不是经过验证的应用结构，不能照搬。
 3. 从实际设备列表核对 SN；确认应用列表或搜索输入是否支持完整包名。`com.test.triangleOHOS` 与 `triangleOHOS` 分别是包名和显示名，不能假定两者在 DOM 中相同。若只能按显示名选择，参数应改用实际显示名，或为真实包名搜索/选择入口定义规则。
 4. 仍失败时读取本次输出目录的 `exploration_round1.jsonl`：搜索“操作失败”、`step_done` 和 `select_option`，查看当时工具输入和页面状态。日志中的最后一个失败原因与生成的未完成脚本一起用于定位；不要把未通过 clean-replay 的脚本作为成功产物。
@@ -39,8 +76,8 @@
 建议先验证的描述（前提是应用能按完整包名搜索或定位）：
 
 ```text
-步骤1：点击 Record trace，点击 Target device 展开设备列表，选择 ${deviceSn} 对应的设备，验证已连接该设备并且 Application to profile 出现。
-步骤2：展开 Application to profile，选择 ${vkPackageName} 对应的应用，验证当前所选应用对应 ${vkPackageName}。
+步骤1：点击 Record trace，在 Target device 选择 ${deviceSn} 对应的设备，等待 Application to profile 出现。
+步骤2：在应用搜索框 Click to search 输入 ${vkPackageName}，等待结果后选择对应应用，在包含标题 Application to profile 的列表项中验证当前包名为 ${vkPackageName}。
 ```
 
 如果应用提供包名搜索框，在步骤2明确写出“在应用搜索框输入 `${vkPackageName}`，等待结果后选择对应应用”。不要凭空要求不存在的控件。
