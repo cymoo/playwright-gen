@@ -107,6 +107,16 @@ function snapshotScript(sel: string): string {
 
 export class ResolveError extends Error {}
 
+/** Only locator identity text is templated; roles and indices remain structural. */
+function mapLocatorText(d: LocatorDescriptor, map: (text: string) => string): LocatorDescriptor {
+  switch (d.kind) {
+    case 'role': return d.name ? { ...d, name: map(d.name) } : d;
+    case 'label': case 'placeholder': case 'text': return { ...d, text: map(d.text) };
+    case 'testId': return { ...d, testId: map(d.testId) };
+    case 'rule': return d;
+  }
+}
+
 interface Ref {
   ref: string;
   role: string;
@@ -290,8 +300,34 @@ export class Session {
       return { locator: await resolveRule(this.page, rule, this.opts.params ?? {}, timeout), descriptor: { kind: 'rule', rule } };
     }
     if (/\$\{[A-Za-z_]\w*\}/.test(t)) {
+      const params = this.opts.params ?? {};
+      const value = paramText(t, params);
+      // Parameters may identify an accessible name, not a standalone DOM text node.
+      // Use the same faithful candidates as ordinary targets, retaining the explicit template.
+      const refs = [...this.refs.values()];
+      const exact = refs.filter(r => r.name === value);
+      const matches = exact.length ? exact : refs.filter(r => r.name.includes(value));
+      if (matches.length > 1) {
+        throw new ResolveError(`参数目标 "${t}" 匹配多个可交互元素，请用包含参数的完整名称或 @规则限定范围。`);
+      }
+      if (matches.length === 1) {
+        const r = matches[0];
+        for (const candidate of r.candidates) {
+          const faithful = await this.faithfulDescriptor(r.ref, candidate);
+          if (!faithful) continue;
+          let templated = false;
+          const descriptor = mapLocatorText(faithful, text => {
+            if (!text.includes(value)) return text;
+            templated = true;
+            return text.replaceAll(value, () => t);
+          });
+          if (!templated || literalReferenceError(descriptor, params)) continue;
+          const locator = buildLocator(this.page, mapLocatorText(descriptor, text => paramText(text, params)));
+          if (await elementIsRef(locator, r.ref)) return { locator, descriptor };
+        }
+      }
       const descriptor: LocatorDescriptor = { kind: 'text', text: t, exact: true };
-      const locator = this.page.getByText(paramText(t, this.opts.params ?? {}), { exact: true });
+      const locator = this.page.getByText(value, { exact: true });
       await expect(locator).toHaveCount(1, { timeout });
       return { locator, descriptor };
     }
@@ -312,15 +348,19 @@ export class Session {
 
     if (ref) {
       const r = this.refs.get(ref)!;
+      let referenceFailure: string | undefined;
       // 逐个候选校验忠实性(执行 == 记录),取第一个能唯一命中该元素的
       for (const cand of r.candidates) {
+        // A sample-dependent name must not silently degrade to a fixed position.
+        if (referenceFailure && cand.kind === 'role' && !cand.name) continue;
         const faithful = await this.faithfulDescriptor(ref, cand);
         if (faithful) {
           const error = literalReferenceError(faithful, this.opts.params ?? {});
-          if (error) throw new ResolveError(error);
+          if (error) { referenceFailure = error; continue; }
           return { locator: buildLocator(this.page, faithful), descriptor: faithful };
         }
       }
+      if (referenceFailure) throw new ResolveError(referenceFailure);
       throw new ResolveError(
         `"${target}" 无法推导出稳定唯一的语义定位,请换用更明确的元素或 ref。当前:\n${this.refsBrief()}`,
       );

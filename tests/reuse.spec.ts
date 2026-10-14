@@ -12,6 +12,95 @@ import { Session } from '../src/browser';
 
 const rule: Rule = { scope: '#resources', role: 'button', text: 'Buffer', match: 'numberSuffix', pick: 'unique' };
 
+test('参数目标可按控件名称定位，并保留完整名称中的参数引用', async ({ page }) => {
+  await page.setContent('<button aria-label="Device SN-A">连接</button>');
+  const session = new Session({ mode: 'web', url: 'about:blank' }, { headless: true, params: { deviceSn: 'SN-A' } });
+  session.page = page;
+  await session.snapshot();
+  const { descriptor, locator } = await session.resolve('${deviceSn}', 200);
+  expect(descriptor).toEqual({ kind: 'role', role: 'button', name: 'Device ${deviceSn}' });
+  await expect(locator).toHaveAttribute('aria-label', 'Device SN-A');
+});
+
+test('ref 的首个候选含样例值时继续寻找同一元素的稳定 testId', async ({ page }) => {
+  await page.setContent('<button aria-label="Target device SN-A" data-testid="device-picker">设备</button>');
+  const session = new Session({ mode: 'web', url: 'about:blank' }, { headless: true, params: { deviceSn: 'SN-A' } });
+  session.page = page;
+  await session.snapshot();
+  expect(await session.click('e1')).toEqual({ kind: 'testId', testId: 'device-picker' });
+});
+
+test('参数定位拒绝同名候选，含参数值的 ref 不降级为固定序号', async ({ page }) => {
+  const session = new Session({ mode: 'web', url: 'about:blank' }, { headless: true, params: { deviceSn: 'SN-A' } });
+  session.page = page;
+  await page.setContent('<button>SN-A</button><button>SN-A</button>');
+  await session.snapshot();
+  await expect(session.resolve('${deviceSn}', 200)).rejects.toThrow('匹配多个');
+  await expect(session.resolve('e1', 200)).rejects.toThrow('样例值不能写死');
+});
+
+test('自定义下拉框 select_option 失败后可改用参数化点击完成步骤', async () => {
+  const { makeTools } = await import('../src/engine');
+  const session = {
+    selectOption: async () => { throw new Error('Element is not a <select> element'); },
+    click: async () => ({ kind: 'text', text: '${deviceSn}', exact: true }),
+    assertVisible: async () => ({ kind: 'text', text: 'Application to profile' }),
+    snapshot: async () => 'state',
+  } as unknown as Session;
+  const flag = { done: false, summary: '', rejects: 0, lastError: '' };
+  const tools = makeTools({ session, traj: new Trajectory(), runDir: '.', vision: false, mark: 0,
+    needsAssert: true, flag, config: { params: { deviceSn: 'SN-A' }, rules: {} },
+    description: '选择 ${deviceSn}，预期 Application to profile 出现' });
+  const options = { toolCallId: 'test', messages: [], context: undefined };
+  expect(await tools.select_option.execute!({ target: 'e1', value: '${deviceSn}' }, options)).toContain('操作失败');
+  expect(flag.lastError).toContain('Element is not a <select> element');
+  await tools.click.execute!({ target: '${deviceSn}' }, options);
+  expect(await tools.step_done.execute!({ summary: '已选择设备' }, options)).toContain('尚未做任何断言');
+  expect(flag.done).toBe(false);
+  await tools.assert_visible.execute!({ target: 'Application to profile' }, options);
+  await tools.step_done.execute!({ summary: '已选择设备并验证应用区域' }, options);
+  expect(flag.done).toBe(true);
+});
+
+test('从真实参数化点击生成脚本，更换设备与两个包名后仍可回放', async ({ page }) => {
+  test.setTimeout(60000);
+  const { runPlaywright } = await import('../src/runner');
+  const root = join(process.cwd(), 'output'); mkdirSync(root, { recursive: true });
+  const dir = mkdtempSync(join(root, 'reuse-picker-'));
+  const params = { deviceSn: 'SN-A', vkPackageName: 'com.sample.vulkan', glPackageName: 'com.sample.gles' };
+  const fixture = (values: typeof params) => `
+    <button aria-label="Device ${values.deviceSn}" onclick="document.querySelector('#device').textContent=this.getAttribute('aria-label')">连接</button>
+    <button aria-label="Vulkan ${values.vkPackageName}" onclick="document.querySelector('#app').textContent=this.getAttribute('aria-label')">选择 Vulkan</button>
+    <button aria-label="GLES ${values.glPackageName}" onclick="document.querySelector('#app').textContent=this.getAttribute('aria-label')">选择 GLES</button>
+    <p id="device" data-testid="device-result"></p><p id="app" data-testid="app-result"></p>`;
+  try {
+    const html = join(dir, 'fixture.html');
+    writeFileSync(html, fixture(params));
+    const session = new Session({ mode: 'web', url: pathToFileURL(html).href }, { headless: true, params });
+    session.page = page;
+    await session.goto(pathToFileURL(html).href);
+    await session.snapshot();
+    const traj = new Trajectory();
+    traj.add({ kind: 'goto', url: pathToFileURL(html).href });
+    for (const key of Object.keys(params)) {
+      traj.add({ kind: 'click', target: await session.click('${' + key + '}') });
+      const target = { kind: 'testId' as const, testId: key === 'deviceSn' ? 'device-result' : 'app-result' };
+      await expect(page.getByTestId(target.testId)).toContainText(params[key as keyof typeof params]);
+      traj.add({ kind: 'assertText', target, text: '${' + key + '}' });
+    }
+    const spec = join(dir, 'pickers.spec.ts');
+    const code = renderTest(traj, { testName: 'pickers', description: '', target: { mode: 'web', url: '' } });
+    for (const sample of Object.values(params)) expect(code).not.toContain(sample);
+    writeFileSync(spec, code);
+    writeRuntime(dir);
+    for (const next of [params, { deviceSn: 'SN-B', vkPackageName: 'com.other.vulkan', glPackageName: 'com.other.gles' }]) {
+      writeFileSync(html, fixture(next));
+      const result = await runPlaywright(spec, 25000, next);
+      expect(result.passed, result.output).toBe(true);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('参数保留原值、缺失报错、命令拒绝 shell 片段', () => {
   expect(paramText('${path}/${name}', { path: 'C:\\a b', name: '${literal}' })).toBe('C:\\a b/${literal}');
   expect(() => paramText('${missing}', {})).toThrow('缺少参数');
