@@ -118,10 +118,13 @@ export function makeTools(ctx: ToolCtx): ToolSet {
   // Only rejected literal inputs require the same operation to be corrected.
   // Ordinary tool failures may be recovered through a different tool (custom selects, etc.).
   const pendingFailures = new Set<string>();
+  const unrecoveredFailures = new Map<string, string>();
+  const actionTools = new Set(['click', 'click_and_save', 'fill', 'check', 'uncheck',
+    'select_option', 'hover', 'press_key', 'run_command', 'write_file']);
 
   const withState = async (msg: string) => `${msg}\n\n${await session.snapshot()}`;
   // 所有异常(定位失败/超时等)都转为文字反馈给模型,让它自纠而不是中断对话
-  const guard = async (fn: () => Promise<string>): Promise<string> => {
+  const guard = async <T>(fn: () => Promise<T>): Promise<T | string> => {
     try {
       return await fn();
     } catch (e) {
@@ -165,7 +168,7 @@ export function makeTools(ctx: ToolCtx): ToolSet {
           const abs = resolve(ctx.runDir, paramText(save_as, ctx.config.params));
           const rel = relative(resolve(ctx.runDir), abs);
           if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) {
-            return `save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
+            return `操作失败:save_as 必须是本次运行目录内的相对路径(收到:${save_as})。直接写文件名即可。`;
           }
           const d = await session.clickAndSave(target, abs, ms);
           const size = statSync(abs).size; // 先取 size 再记录,避免"已记录却报失败"的不一致
@@ -322,9 +325,9 @@ export function makeTools(ctx: ToolCtx): ToolSet {
         guard(async () => {
           const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
           const r = await execShell(paramCommand(command, ctx.config.params), { stdinLines: stdin_lines?.map(line => paramCommand(line, ctx.config.params)), timeoutMs: ms, cwd: ctx.runDir });
-          if (r.timedOut) return `命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
-          if (r.code === null) return `命令启动失败或被信号终止,未记录到用例。输出:\n${capOutput(r.output)}`;
-          if (r.code !== 0) return `命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
+          if (r.timedOut) return `操作失败:命令超时(${ms}ms)已终止,未记录到用例。输出:\n${capOutput(r.output)}`;
+          if (r.code === null) return `操作失败:命令启动失败或被信号终止,未记录到用例。输出:\n${capOutput(r.output)}`;
+          if (r.code !== 0) return `操作失败:命令退出码 ${r.code}(非 0,未记录到用例)。输出:\n${capOutput(r.output)}`;
           traj.add({ kind: 'runCommand', command, stdin: stdin_lines, timeoutMs: ms });
           return `命令成功(退出码 0),已记录到用例。输出:\n${capOutput(r.output)}`;
         }),
@@ -357,6 +360,10 @@ export function makeTools(ctx: ToolCtx): ToolSet {
       inputSchema: z.object({ summary: z.string() }),
       execute: async ({ summary }) => {
         if (pendingFailures.size) return `操作失败尚未修正，请重新正确执行: ${[...pendingFailures].join(', ')}`;
+        if (unrecoveredFailures.size) {
+          const failures = [...unrecoveredFailures].map(([name, error]) => `${name}: ${error.slice(0, 300)}`).join('; ');
+          return `普通工具失败尚未恢复: ${failures}。请成功执行替代操作；仅观察或断言不能代替失败的操作，失败的断言/读取可以重试自身。`;
+        }
         const delta = traj.since(ctx.mark);
         const refError = referenceError(ctx.description, delta, ctx.config);
         if (refError) return refError;
@@ -393,7 +400,7 @@ export function makeTools(ctx: ToolCtx): ToolSet {
   for (const [name, configuredTool] of Object.entries(tools)) {
     if (!configuredTool.execute || ['get_page_state', 'look'].includes(name)) continue;
     const execute = configuredTool.execute;
-    configuredTool.execute = (input, options) => {
+    configuredTool.execute = async (input, options) => {
       // Ref/alias handles are validated through the resolved descriptor, not their spelling.
       const args = { ...input };
       if (typeof args.target === 'string' && /^(?:e\d+|@[A-Za-z_]\w*)$/.test(args.target)) delete args.target;
@@ -401,16 +408,26 @@ export function makeTools(ctx: ToolCtx): ToolSet {
       if (error) {
         pendingFailures.add(name);
         ctx.flag.lastError = `${name}: ${error}`;
-        return Promise.resolve(`操作失败:${error}`);
+        return `操作失败:${error}`;
       }
-      return Promise.resolve(execute(input, options)).then(result => {
-        if (typeof result === 'string') {
-          if (result.startsWith('操作失败:') || (name === 'step_done' && !ctx.flag.done)) {
-            ctx.flag.lastError = `${name}: ${result}`;
-          } else pendingFailures.delete(name);
+      const mark = traj.steps.length;
+      const result = await guard(async () => execute(input, options));
+      if (typeof result === 'string') {
+        if (result.startsWith('操作失败:')) {
+          ctx.flag.lastError = `${name}: ${result}`;
+          unrecoveredFailures.set(name, result);
+        } else if (name === 'step_done' && !ctx.flag.done) {
+          ctx.flag.lastError = `${name}: ${result}`;
+        } else {
+          pendingFailures.delete(name);
+          // Only a successful, recorded action can recover another tool's failure.
+          // Retrying an assertion/read may recover itself, but never a failed action.
+          if (actionTools.has(name) && traj.since(mark).some(s => !s.kind.startsWith('assert'))) {
+            unrecoveredFailures.clear();
+          } else unrecoveredFailures.delete(name);
         }
-        return result;
-      });
+      }
+      return result;
     };
   }
   return tools;

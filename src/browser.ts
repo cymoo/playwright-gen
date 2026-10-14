@@ -313,8 +313,11 @@ export class Session {
       if (matches.length === 1) {
         const r = matches[0];
         for (const candidate of r.candidates) {
-          const faithful = await this.faithfulDescriptor(r.ref, candidate);
-          if (!faithful) continue;
+          // The full snapshot name must stay exact. Never repair parameter identity
+          // with nth: adding/reordering a similarly named item must not change the target.
+          const faithful = candidate.kind === 'role' || candidate.kind === 'label'
+            ? { ...candidate, exact: true } : candidate;
+          if (faithful.nth !== undefined || !await elementIsRef(buildLocator(this.page, faithful), r.ref)) continue;
           let templated = false;
           const descriptor = mapLocatorText(faithful, text => {
             if (!text.includes(value)) return text;

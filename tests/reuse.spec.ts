@@ -18,7 +18,7 @@ test('参数目标可按控件名称定位，并保留完整名称中的参数�
   session.page = page;
   await session.snapshot();
   const { descriptor, locator } = await session.resolve('${deviceSn}', 200);
-  expect(descriptor).toEqual({ kind: 'role', role: 'button', name: 'Device ${deviceSn}' });
+  expect(descriptor).toEqual({ kind: 'role', role: 'button', name: 'Device ${deviceSn}', exact: true });
   await expect(locator).toHaveAttribute('aria-label', 'Device SN-A');
 });
 
@@ -37,6 +37,110 @@ test('参数定位拒绝同名候选，含参数值的 ref 不降级为固定序
   await session.snapshot();
   await expect(session.resolve('${deviceSn}', 200)).rejects.toThrow('匹配多个');
   await expect(session.resolve('e1', 200)).rejects.toThrow('样例值不能写死');
+});
+
+for (const kind of ['role', 'label'] as const) {
+  test(`参数化 ${kind} 完整名称在备选项重排与换参后仍选择正确目标`, async ({ page }) => {
+    test.setTimeout(60000);
+    const { runPlaywright } = await import('../src/runner');
+    const root = join(process.cwd(), 'output'); mkdirSync(root, { recursive: true });
+    const dir = mkdtempSync(join(root, 'reuse-exact-'));
+    const fixture = (sn: string, reversed: boolean) => {
+      const entries = ['primary', 'backup'];
+      if (reversed) entries.reverse();
+      return entries.map(id => {
+        const name = id === 'primary' ? sn : `${sn} backup`;
+        return kind === 'role'
+          ? `<button aria-label="${name}" onclick="document.querySelector('output').textContent='${id}'">选择</button>`
+          : `<label for="${id}">${name}</label><input id="${id}" type="range" onclick="document.querySelector('output').textContent='${id}'">`;
+      }).join('') + '<output data-testid="result"></output>';
+    };
+    try {
+      const html = join(dir, 'fixture.html');
+      writeFileSync(html, fixture('SN-A', false));
+      const session = new Session({ mode: 'web', url: pathToFileURL(html).href }, { headless: true, params: { sn: 'SN-A' } });
+      session.page = page;
+      await session.goto(pathToFileURL(html).href);
+      await session.snapshot();
+      const traj = new Trajectory();
+      traj.add({ kind: 'goto', url: pathToFileURL(html).href });
+      const descriptor = await session.click('${sn}');
+      traj.add({ kind: 'click', target: descriptor });
+      traj.add({ kind: 'assertText', target: { kind: 'testId', testId: 'result' }, text: 'primary' });
+      const spec = join(dir, 'exact.spec.ts');
+      writeFileSync(spec, renderTest(traj, { testName: 'exact', description: '', target: { mode: 'web', url: '' } }));
+      writeRuntime(dir);
+      writeFileSync(html, fixture('SN-B', true));
+      const result = await runPlaywright(spec, 25000, { sn: 'SN-B' });
+      expect(result.passed, result.output).toBe(true);
+      expect(descriptor.kind).toBe(kind);
+      expect(descriptor).toHaveProperty('exact', true);
+      expect(descriptor.nth).toBeUndefined();
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}
+
+test('普通操作失败不能靠既有操作、后续断言或观察跳过，成功替代操作后才恢复', async () => {
+  const { makeTools } = await import('../src/engine');
+  const session = {
+    selectOption: async () => { throw new Error('Element is not a <select> element'); },
+    click: async () => ({ kind: 'text', text: 'Device' }),
+    assertVisible: async () => ({ kind: 'text', text: 'Application to profile' }),
+    scroll: async () => {},
+    snapshot: async () => 'state',
+  } as unknown as Session;
+  const flag = { done: false, summary: '', rejects: 0 };
+  const tools = makeTools({ session, traj: new Trajectory(), runDir: '.', vision: false, mark: 0,
+    needsAssert: true, flag, config: { params: {}, rules: {} }, description: '选择设备，预期应用区域出现' });
+  const options = { toolCallId: 'test', messages: [], context: undefined };
+  await tools.click.execute!({ target: 'Device' }, options);
+  await tools.assert_visible.execute!({ target: 'Application to profile' }, options);
+  await tools.select_option.execute!({ target: 'Device', value: 'SN-A' }, options);
+  expect(await tools.step_done.execute!({ summary: 'done' }, options)).toContain('尚未恢复');
+  expect(flag.done).toBe(false);
+  await tools.assert_visible.execute!({ target: 'Application to profile' }, options);
+  await tools.get_page_state.execute!({}, options);
+  await tools.scroll.execute!({ direction: 'down' }, options);
+  expect(await tools.step_done.execute!({ summary: 'done' }, options)).toContain('尚未恢复');
+  expect(flag.done).toBe(false);
+  await tools.click.execute!({ target: 'Device' }, options);
+  await tools.step_done.execute!({ summary: 'done' }, options);
+  expect(flag.done).toBe(true);
+});
+
+test('断言失败重试成功可恢复自身，非零命令退出不能被误认作恢复成功', async () => {
+  const { makeTools } = await import('../src/engine');
+  let assertionFails = true;
+  const session = {
+    click: async () => ({ kind: 'text', text: 'Device' }),
+    assertVisible: async () => {
+      if (assertionFails) throw new Error('not visible yet');
+      return { kind: 'text', text: 'Ready' };
+    },
+    snapshot: async () => 'state',
+  } as unknown as Session;
+  const options = { toolCallId: 'test', messages: [], context: undefined };
+  const flag = { done: false, summary: '', rejects: 0 };
+  const tools = makeTools({ session, traj: new Trajectory(), runDir: '.', vision: false, mark: 0,
+    needsAssert: true, flag, config: { params: {}, rules: {} }, description: '操作并验证结果' });
+  await tools.click.execute!({ target: 'Device' }, options);
+  await tools.assert_visible.execute!({ target: 'Ready' }, options);
+  expect(await tools.step_done.execute!({ summary: 'done' }, options)).toContain('尚未恢复');
+  assertionFails = false;
+  await tools.assert_visible.execute!({ target: 'Ready' }, options);
+  await tools.step_done.execute!({ summary: 'done' }, options);
+  expect(flag.done).toBe(true);
+
+  const commandFlag = { done: false, summary: '', rejects: 0 };
+  const commandTools = makeTools({ session, traj: new Trajectory(), runDir: '.', vision: false, mark: 0,
+    needsAssert: false, flag: commandFlag, config: { params: {}, rules: {} }, description: '执行命令' });
+  await commandTools.click.execute!({ target: 'Device' }, options);
+  expect(await commandTools.run_command.execute!({ command: 'exit 7' }, options)).toContain('操作失败:命令退出码 7');
+  expect(await commandTools.step_done.execute!({ summary: 'done' }, options)).toContain('尚未恢复');
+  expect(commandFlag.done).toBe(false);
+  await commandTools.run_command.execute!({ command: 'exit 0' }, options);
+  await commandTools.step_done.execute!({ summary: 'done' }, options);
+  expect(commandFlag.done).toBe(true);
 });
 
 test('自定义下拉框 select_option 失败后可改用参数化点击完成步骤', async () => {
