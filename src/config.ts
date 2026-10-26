@@ -3,14 +3,24 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { paramText, type Params, type Rule } from './runtime';
 
+const stableScope = z.string().min(1).refine(v => !v.includes('${'), 'scope 不支持参数，请使用稳定范围');
+const ruleOptions = {
+  scope: stableScope.default('body'),
+  pick: z.union([z.enum(['unique', 'first']), z.number().int().min(0)]).default('unique'),
+  minCount: z.number().int().min(1).optional(),
+};
+const locatorSchema = z.union([
+  z.object({ kind: z.enum(['title', 'testId', 'label', 'placeholder', 'text']), value: z.string().min(1) }).strict(),
+  z.object({ kind: z.literal('css'), value: stableScope }).strict(),
+  z.object({ kind: z.literal('role'), role: z.string().min(1), name: z.string().optional() }).strict(),
+]);
 const schema = z.object({
   params: z.record(z.string().regex(/^[A-Za-z_]\w*$/), z.string().min(1)).default({}),
-  rules: z.record(z.string().regex(/^[A-Za-z_]\w*$/), z.object({
-    scope: z.string().min(1).refine(v => !v.includes('${'), 'scope 不支持参数，请使用稳定范围'), role: z.string().optional(), text: z.string().min(1),
+  rules: z.record(z.string().regex(/^[A-Za-z_]\w*$/), z.union([z.object({
+    ...ruleOptions,
+    role: z.string().optional(), text: z.string().min(1),
     match: z.enum(['exact', 'numberSuffix']).default('exact'),
-    pick: z.union([z.enum(['unique', 'first']), z.number().int().min(0)]).default('unique'),
-    minCount: z.number().int().min(1).optional(),
-  }).strict()).default({}),
+  }).strict(), z.object({ ...ruleOptions, locator: locatorSchema }).strict()])).default({}),
 }).strict();
 export interface ReuseConfig { params: Params; rules: Record<string, Rule> }
 export function loadConfig(path?: string): ReuseConfig {
@@ -30,7 +40,9 @@ export function validateDescription(description: string, config: ReuseConfig): v
   for (const match of description.matchAll(/(?<![\w.+-])@([A-Za-z_]\w*)/g)) {
     const rule = config.rules[match[1]];
     if (!rule) throw new Error(`未定义定位规则 @${match[1]}，请在配置 rules 中声明`);
-    paramText(rule.text, config.params);
+    if (rule.locator) {
+      paramText(JSON.stringify(rule.locator), config.params);
+    } else paramText(rule.text, config.params);
   }
 }
 export function writeRuntime(dir: string): void {

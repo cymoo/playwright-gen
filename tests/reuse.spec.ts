@@ -92,7 +92,7 @@ for (const kind of ['role', 'label'] as const) {
         const name = id === 'primary' ? sn : `${sn} backup`;
         return kind === 'role'
           ? `<button aria-label="${name}" onclick="document.querySelector('output').textContent='${id}'">选择</button>`
-          : `<label for="${id}">${name}</label><input id="${id}" type="range" onclick="document.querySelector('output').textContent='${id}'">`;
+          : `<label for="${id}">${name}</label><input id="${id}" type="password" onclick="document.querySelector('output').textContent='${id}'">`;
       }).join('') + '<output data-testid="result"></output>';
     };
     try {

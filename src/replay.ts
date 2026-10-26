@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { resolve, join, extname, basename, dirname } from 'node:path';
-import { runPlaywright, type RunResult } from './runner';
+import { runPlaywright, type RunResult, type RunOptions } from './runner';
 import type { Params } from './runtime';
 
 export function scanFiles(dir: string, ext: string, recursive = false): string[] {
@@ -21,6 +21,7 @@ export function scanFiles(dir: string, ext: string, recursive = false): string[]
 interface ReplayOpts {
   spec: string; params: Params; inputDir?: string; ext?: string;
   recursive?: boolean; timeoutMs: number; report: string;
+  debug?: boolean; pauseOnFailure?: boolean; trace?: RunOptions['trace'];
 }
 export interface FileResult extends RunResult { file?: string }
 export async function replay(opts: ReplayOpts, runner = runPlaywright): Promise<FileResult[]> {
@@ -29,6 +30,9 @@ export async function replay(opts: ReplayOpts, runner = runPlaywright): Promise<
   if (!statSync(spec).isFile()) throw new Error('spec 必须是文件');
   if (!!opts.inputDir !== !!opts.ext) throw new Error('--input-dir 和 --ext 必须一起提供');
   const files: (string | undefined)[] = opts.inputDir ? scanFiles(opts.inputDir, opts.ext!, opts.recursive) : [undefined];
+  if (opts.inputDir && (opts.debug || opts.pauseOnFailure || (process.env.PWDEBUG && process.env.PWDEBUG !== '0'))) {
+    throw new Error('调试仅支持单次回放，请去掉 --input-dir 并用 --config 指定一个输入文件');
+  }
   if (opts.inputDir) {
     const header = readFileSync(spec, 'utf8').match(/^\/\/ pwgen-parameters: (.+)$/m);
     const names: string[] = header ? JSON.parse(header[1]) : [];
@@ -46,12 +50,18 @@ export async function replay(opts: ReplayOpts, runner = runPlaywright): Promise<
   for (const file of files) {
     const params = { ...opts.params, ...(file ? { inputFile: file, inputName: basename(file) } : {}) };
     let result: RunResult;
-    try { result = await runner(spec, opts.timeoutMs, params); }
+    try { result = await runner(spec, opts.timeoutMs, params, undefined, {
+      debug: opts.debug, pauseOnFailure: opts.pauseOnFailure, trace: opts.trace,
+      onOutput: text => process.stdout.write(text),
+    }); }
     catch (error) { result = { passed: false, output: String(error) }; }
     results.push({ file, ...result });
     mkdirSync(dirname(report), { recursive: true });
     writeFileSync(report, JSON.stringify({ files, results }, null, 2));
     console.log(`${result.passed ? 'PASS' : 'FAIL'} ${file ?? spec}`);
+    if (!result.passed) console.error(result.failureSummary ?? result.output);
+    if (result.logPath) console.log(`[诊断] 完整日志: ${result.logPath}`);
+    if (result.artifactsDir) console.log(`[诊断] 本次产物: ${result.artifactsDir}`);
   }
   return results;
 }

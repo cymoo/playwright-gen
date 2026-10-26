@@ -2,13 +2,38 @@
 import { expect, type Page, type Locator } from '@playwright/test';
 
 export type Params = Record<string, string>;
-export interface Rule {
+export type RuleLocator =
+  | { kind: 'title' | 'testId' | 'css' | 'label' | 'placeholder' | 'text'; value: string }
+  | { kind: 'role'; role: string; name?: string };
+
+interface RuleOptions {
   scope: string;
+  pick: 'unique' | 'first' | number;
+  minCount?: number;
+}
+export type Rule = RuleOptions & ({
   role?: string;
   text: string;
   match: 'exact' | 'numberSuffix';
-  pick: 'unique' | 'first' | number;
-  minCount?: number;
+  locator?: never;
+} | { locator: RuleLocator; text?: never; role?: never; match?: never });
+
+/** Explicit user rules; CSS parameters are intentionally disallowed by config validation. */
+function ruleLocator(scope: Locator, spec: RuleLocator, params: Params): Locator {
+  if (spec.kind === 'css') {
+    if (spec.value.includes('${')) throw new Error('CSS 定位不支持参数插值，请使用稳定选择器');
+    return scope.locator(spec.value);
+  }
+  if (spec.kind === 'role') return scope.getByRole(spec.role as Parameters<Page['getByRole']>[0],
+    { name: spec.name === undefined ? undefined : paramText(spec.name, params), exact: true });
+  const value = paramText(spec.value, params);
+  switch (spec.kind) {
+    case 'title': return scope.getByTitle(value, { exact: true });
+    case 'testId': return scope.getByTestId(value);
+    case 'label': return scope.getByLabel(value, { exact: true });
+    case 'placeholder': return scope.getByPlaceholder(value, { exact: true });
+    case 'text': return scope.getByText(value, { exact: true });
+  }
 }
 
 export function readParams(): Params {
@@ -29,10 +54,10 @@ export async function resolveRule(page: Page, rule: Rule, params: Params, timeou
   const remaining = timeBudget(timeout);
   const scope = page.locator(rule.scope);
   await expect(scope, `定位范围必须唯一: ${rule.scope}`).toHaveCount(1, { timeout: remaining() });
-  const text = paramText(rule.text, params);
+  const text = rule.locator ? JSON.stringify(rule.locator) : paramText(rule.text, params);
   const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const name = rule.match === 'numberSuffix' ? new RegExp(`^${escaped}\\s+\\d+$`) : text;
-  const matches = rule.role
+  const matches = rule.locator ? ruleLocator(scope, rule.locator, params) : rule.role
     ? scope.getByRole(rule.role as Parameters<Page['getByRole']>[0], { name, exact: true })
     : scope.getByText(name, { exact: true });
   if (rule.pick === 'unique') {

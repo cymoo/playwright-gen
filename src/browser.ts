@@ -36,7 +36,8 @@ const INTERACTIVE_SELECTOR =
   'button,[role=button],a[href],[role=link],input:not([type=hidden]),' +
   'textarea,select,[role=checkbox],[role=radio],[role=switch],[role=tab],' +
   '[role=menuitem],[role=menuitemcheckbox],[role=menuitemradio],[role=option],' +
-  '[role=combobox],[role=treeitem],summary';
+  '[role=combobox],[role=treeitem],summary,[title],[data-testid],[aria-label],[aria-labelledby],' +
+  '[contenteditable=true],[tabindex]:not([tabindex="-1"])';
 
 /** 操作类动作的超时(重型应用的界面切换可能较慢);断言保持 5s,与回放默认一致。 */
 const ACTION_TIMEOUT = 10_000;
@@ -62,14 +63,18 @@ function snapshotScript(sel: string): string {
     if (tag === 'select') return 'combobox';
     if (tag === 'textarea') return 'textbox';
     if (tag === 'summary') return 'button';
+    if (el.isContentEditable) return 'textbox';
     if (tag === 'input') {
       const t = (el.getAttribute('type') || 'text').toLowerCase();
       if (t === 'checkbox') return 'checkbox';
       if (t === 'radio') return 'radio';
+      if (t === 'number') return 'spinbutton';
+      if (t === 'range') return 'slider';
+      if (t === 'search') return 'searchbox';
       if (t === 'submit' || t === 'button' || t === 'reset') return 'button';
-      return 'textbox';
+      return ['text', 'email', 'tel', 'url'].includes(t) ? 'textbox' : '';
     }
-    return tag;
+    return '';
   };
   const labelText = (label) => {
     const copy = label.cloneNode(true);
@@ -79,12 +84,34 @@ function snapshotScript(sel: string): string {
   const nameOf = (el) => {
     const al = el.getAttribute('aria-label'); if (al) return al.trim();
     const lid = el.getAttribute('aria-labelledby');
-    if (lid) { const r = document.getElementById(lid.split(' ')[0]); if (r) return (r.textContent || '').trim(); }
+    if (lid) return lid.trim().split(/\\s+/).map(id => document.getElementById(id)?.textContent || '').join(' ').trim();
     if (el.id) { try { const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (lbl) return labelText(lbl); } catch (e) {} }
     const wrap = el.closest('label'); if (wrap) return labelText(wrap);
     const tag = el.tagName.toLowerCase();
     if (tag === 'input' || tag === 'textarea' || tag === 'select') return (el.getAttribute('placeholder') || '').trim();
     return (el.textContent || '').trim();
+  };
+  // A nearby label is evidence, never an invented accessible name. Only accept a
+  // small container with one form control and one non-unit leaf label.
+  const fieldOf = (el) => {
+    if (!['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName)) return undefined;
+    const controls = 'input:not([type=hidden]),textarea,select';
+    for (let box = el.parentElement, depth = 0; box && depth < 3 && !['BODY', 'HTML'].includes(box.tagName); box = box.parentElement, depth++) {
+      if (box.querySelectorAll(controls).length !== 1) break;
+      const labels = Array.from(box.querySelectorAll('label,span,div,p,dt,h3,h4')).filter(node => {
+        const text = (node.textContent || '').trim();
+        return !node.contains(el) && !node.querySelector('label,span,div,p,dt,h3,h4') && isVis(node)
+          && text.length > 1 && text.length <= 80 && !/^(?:[\\d.,%+-]+|[uµμnmk]?s|hz|khz|mhz|bytes?|kb|mb|gb)$/i.test(text);
+      });
+      if (labels.length !== 1) continue;
+      const label = labels[0];
+      let levels = 0;
+      for (let node = label; node && node !== box; node = node.parentElement) levels++;
+      const units = Array.from(box.querySelectorAll('span,div')).filter(node => !node.contains(el) && isVis(node)
+        && /^[uµμnmk]?s$|^(?:hz|khz|mhz|bytes?|kb|mb|gb)$/i.test((node.textContent || '').trim()));
+      return { text: label.textContent.trim(), levels, tag: el.tagName.toLowerCase(),
+        unit: units.length === 1 ? units[0].textContent.trim() : undefined };
+    }
   };
   const items = visible.map((el) => ({
     role: roleOf(el),
@@ -93,6 +120,12 @@ function snapshotScript(sel: string): string {
     testid: el.getAttribute('data-testid') || '',
     tag: el.tagName.toLowerCase(),
     type: (el.getAttribute('type') || '').toLowerCase(),
+    title: el.getAttribute('title') || '',
+    id: el.id || '',
+    field: fieldOf(el),
+    value: 'value' in el && el.type !== 'password' ? String(el.value).slice(0, 100) : undefined,
+    min: el.getAttribute('min'), max: el.getAttribute('max'), step: el.getAttribute('step'),
+    disabled: !!el.disabled, readonly: !!el.readOnly,
     checked: (el.getAttribute('aria-checked') === 'true') || !!el.checked || false,
     sameKeyIndex: 0, sameKeyCount: 0, roleIndex: 0, roleCount: 0,
   }));
@@ -116,7 +149,10 @@ export class ResolveError extends Error {}
 function mapLocatorText(d: LocatorDescriptor, map: (text: string) => string): LocatorDescriptor {
   switch (d.kind) {
     case 'role': return d.name ? { ...d, name: map(d.name) } : d;
-    case 'label': case 'placeholder': case 'text': case 'container': return { ...d, text: map(d.text) };
+    case 'label': case 'placeholder': case 'text': case 'container': case 'title': case 'field': return { ...d, text: map(d.text) };
+    // CSS identity is structural; arbitrary parameter values require escaping and
+    // must not be interpolated into selectors. Explicit rules follow the same rule.
+    case 'css': return d;
     case 'testId': return { ...d, testId: map(d.testId) };
     case 'rule': return d;
   }
@@ -127,12 +163,18 @@ interface Ref {
   role: string;
   name: string;
   placeholder: string;
+  title: string;
+  field: string;
+  formControl: boolean;
   candidates: LocatorDescriptor[];
 }
 
 /** 快照条目附带的选中态(供 Agent 判断开关/复选框当前状态)。 */
 interface ScanItem extends SnapshotItem {
   checked?: boolean;
+  value?: string;
+  min?: string | null; max?: string | null; step?: string | null;
+  disabled?: boolean; readonly?: boolean;
 }
 
 /** 据描述符构造实时 Playwright Locator(与 codegen.renderLocator 一一对应)。 */
@@ -154,6 +196,17 @@ export function buildLocator(page: Page, d: LocatorDescriptor): Locator {
       break;
     case 'testId':
       loc = page.getByTestId(d.testId);
+      break;
+    case 'title':
+      loc = page.getByTitle(d.text, { exact: true });
+      break;
+    case 'css':
+      loc = page.locator(d.selector);
+      break;
+    case 'field':
+      loc = page.getByText(d.text, { exact: true })
+        .locator('xpath=' + Array(d.levels).fill('..').join('/'))
+        .locator(d.tag === 'input' ? 'input:not([type=hidden])' : d.tag);
       break;
     case 'container':
       loc = page.getByRole(d.role).filter({ has: page.getByText(d.text, { exact: true }) });
@@ -228,6 +281,8 @@ export class Session {
     } else {
       const bin = resolveElectronBinary(this.spec.bin);
       this.electronApp = await electron.launch({ executablePath: bin, args: this.spec.args });
+      this.context = this.electronApp.context();
+      if (this.opts.tracePath) await this.context.tracing.start({ screenshots: true, snapshots: true });
       this.page = await this.electronApp.firstWindow();
       await this.page.waitForLoadState('domcontentloaded').catch(() => {});
     }
@@ -260,12 +315,21 @@ export class Session {
     const lines: string[] = [];
     items.forEach((it, i) => {
       const ref = `e${i + 1}`;
-      this.refs.set(ref, { ref, role: it.role || '', name: it.name || '', placeholder: it.placeholder || '', candidates: candidateDescriptors(it) });
-      const shown = it.name || it.placeholder || '(无名)';
+      this.refs.set(ref, { ref, role: it.role || '', name: it.name || '', placeholder: it.placeholder || '',
+        title: it.title || '', field: it.field?.text || '',
+        formControl: ['input', 'textarea', 'select'].includes(it.tag) || ['textbox', 'searchbox'].includes(it.role),
+        candidates: candidateDescriptors(it) });
+      const shown = it.name || it.placeholder || it.title || '(无名)';
       const checkable = it.role === 'checkbox' || it.role === 'radio' || it.role === 'switch';
       const state = checkable ? (it.checked ? ' [已选中]' : ' [未选中]') : '';
       const placeholder = it.placeholder && it.placeholder !== shown ? ` [placeholder: "${it.placeholder}"]` : '';
-      lines.push(`${ref}  ${it.role || ''}  "${shown}"${state}${placeholder}`);
+      const facts = [it.field && `邻近字段: ${JSON.stringify(it.field.text)} (非 accessible name)`,
+        it.field?.unit && `单位: ${it.field.unit}`,
+        it.title && `title: ${JSON.stringify(it.title)}`, it.id && `id: ${JSON.stringify(it.id)}`,
+        it.value !== undefined && `value: ${JSON.stringify(it.value)}`,
+        ...(['min', 'max', 'step'] as const).map(key => it[key] != null && `${key}: ${it[key]}`),
+        it.disabled && 'disabled', it.readonly && 'readonly'].filter(Boolean);
+      lines.push(`${ref}  ${it.role || 'element'}  "${shown}"${state}${placeholder}${facts.length ? ' [' + facts.join('; ') + ']' : ''}`);
     });
     let aria = await this.page.locator('body').ariaSnapshot();
     if (aria.length > 3000) aria = aria.slice(0, 3000) + '\n…(ARIA 已截断)';
@@ -289,9 +353,11 @@ export class Session {
   // ---- 定位(忠实:执行的 locator === 记录的描述符)----
 
   /** 校验/修复 guess 描述符,使其唯一命中 data-pwref=ref 的元素;不行返回 null。 */
-  private async faithfulDescriptor(ref: string, guess: LocatorDescriptor): Promise<LocatorDescriptor | null> {
+  private async faithfulDescriptor(ref: string, guess: LocatorDescriptor, allowNth = true): Promise<LocatorDescriptor | null> {
     if (guess.kind === 'rule' || guess.kind === 'container') return null;
     if (await elementIsRef(buildLocator(this.page, guess), ref)) return guess;
+    // A repeated title/field/ID must not become an incidental positional locator.
+    if (!allowNth || guess.kind === 'title' || guess.kind === 'field' || guess.kind === 'css') return null;
     // 据 Playwright 自己的枚举修复 nth(对齐真实序号,消除手写 accname 近似导致的偏差)
     const base = buildLocator(this.page, { ...guess, nth: undefined } as LocatorDescriptor);
     const n = await base.count();
@@ -303,8 +369,15 @@ export class Session {
     return null;
   }
 
-  async resolve(target: string, timeout = ASSERT_TIMEOUT): Promise<{ locator: Locator; descriptor: LocatorDescriptor }> {
+  async resolve(target: string, timeout = ASSERT_TIMEOUT, preferForm = false): Promise<{ locator: Locator; descriptor: LocatorDescriptor }> {
     const t = (target || '').trim();
+    const matchingRefs = (value: string) => {
+      const refs = [...this.refs.values()];
+      const low = value.toLowerCase();
+      const form = preferForm && low ? refs.filter(r => r.formControl &&
+        [r.name, r.placeholder, r.title, r.field].some(text => text.toLowerCase().includes(low))) : [];
+      return form.length ? form : refs;
+    };
     if (t.startsWith('@')) {
       const rule = this.opts.rules?.[t.slice(1)];
       if (!rule) throw new ResolveError(`未定义规则 ${t}`);
@@ -315,7 +388,7 @@ export class Session {
       const value = paramText(t, params);
       // Parameters may identify an accessible name, not a standalone DOM text node.
       // Use the same faithful candidates as ordinary targets, retaining the explicit template.
-      const refs = [...this.refs.values()];
+      const refs = matchingRefs(value);
       const exact = refs.filter(r => r.name === value);
       const matches = exact.length ? exact : refs.filter(r => r.name.includes(value));
       if (matches.length > 1) {
@@ -368,14 +441,16 @@ export class Session {
       ref = t;
     } else {
       const low = t.toLowerCase();
-      const refs = [...this.refs.values()];
-      const matchBy = (field: 'name' | 'placeholder') => {
+      const refs = matchingRefs(t);
+      const matchBy = (field: 'name' | 'placeholder' | 'title' | 'field') => {
         const exact = refs.filter(r => low && r[field].toLowerCase() === low);
         return exact.length ? exact : refs.filter(r => low && r[field].toLowerCase().includes(low));
       };
       // Preserve name matching (including ambiguity) before trying placeholder fallback.
       const names = matchBy('name');
-      const matches = names.length ? names : matchBy('placeholder');
+      const placeholders = names.length ? names : matchBy('placeholder');
+      const titles = placeholders.length ? placeholders : matchBy('title');
+      const matches = titles.length ? titles : matchBy('field');
       if (matches.length === 1) ref = matches[0].ref;
       else if (matches.length > 1) {
         const cands = matches.map((m) => `${m.ref}("${m.name}")`).join(', ');
@@ -388,9 +463,10 @@ export class Session {
       let referenceFailure: string | undefined;
       // 逐个候选校验忠实性(执行 == 记录),取第一个能唯一命中该元素的
       for (const cand of r.candidates) {
+        if ((r.field || r.title) && cand.kind === 'role' && cand.nth !== undefined) continue;
         // A sample-dependent name must not silently degrade to a fixed position.
         if (referenceFailure && cand.kind === 'role' && !cand.name) continue;
-        const faithful = await this.faithfulDescriptor(ref, cand);
+        const faithful = await this.faithfulDescriptor(ref, cand, !r.field && !r.title);
         if (faithful) {
           const error = literalReferenceError(faithful, this.opts.params ?? {});
           if (error) { referenceFailure = error; continue; }
@@ -468,7 +544,7 @@ export class Session {
   }
 
   async fill(target: string, text: string): Promise<LocatorDescriptor> {
-    const { locator, descriptor } = await this.resolve(target);
+    const { locator, descriptor } = await this.resolve(target, ASSERT_TIMEOUT, true);
     await locator.fill(paramText(text, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
     return descriptor;
   }
@@ -486,7 +562,7 @@ export class Session {
   }
 
   async selectOption(target: string, value: string): Promise<LocatorDescriptor> {
-    const { locator, descriptor } = await this.resolve(target);
+    const { locator, descriptor } = await this.resolve(target, ASSERT_TIMEOUT, true);
     await locator.selectOption(paramText(value, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
     return descriptor;
   }
@@ -499,7 +575,7 @@ export class Session {
 
   async press(key: string, target?: string): Promise<LocatorDescriptor | undefined> {
     if (target) {
-      const { locator, descriptor } = await this.resolve(target);
+      const { locator, descriptor } = await this.resolve(target, ASSERT_TIMEOUT, true);
       await locator.press(paramText(key, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
       return descriptor;
     }
@@ -537,6 +613,13 @@ export class Session {
     }
     const { locator, descriptor } = await this.resolve(target);
     await expect(locator).toContainText(paramText(text, this.opts.params ?? {}), { timeout: ASSERT_TIMEOUT });
+    return descriptor;
+  }
+
+  async assertValue(target: string, value: string, timeoutMs = ASSERT_TIMEOUT): Promise<LocatorDescriptor> {
+    const remaining = timeBudget(timeoutMs);
+    const { locator, descriptor } = await this.resolve(target, remaining(), true);
+    await expect(locator).toHaveValue(paramText(value, this.opts.params ?? {}), { timeout: remaining() });
     return descriptor;
   }
 

@@ -52,7 +52,7 @@ npx tsx src/cli.ts --vision --url "file://$PWD/examples/02_visual_icons.html" \
   --description "验证工具栏有保存、删除、分享三个图标按钮"
 ```
 
-可选参数：`--vision`、`--headed`、`--max-steps N`（每步骤轮数预算）、`--max-repairs N`（失败重试轮数，默认 1）、`--trace`、`--name`、`--out-dir`。
+可选参数：`--vision`、`--headed`、`--max-steps N`（每步骤轮数预算）、`--max-repairs N`（失败重试轮数，默认 1）、`--trace`、`--name`、`--out-dir`、`--setup-description`（录入同一用例的准备流程）。
 
 ## 多步骤描述（核心用法）
 
@@ -140,6 +140,8 @@ npx tsx src/cli.ts --url "https://www.saucedemo.com/" \
 
 ## 运行 / 调试生成的用例
 
+0.3.0 起推荐使用保留参数的调试入口：`npx tsx src/cli.ts replay --spec output/<run>/test_generated.spec.ts --config reuse.json --debug`；失败后再暂停使用 `--pause-on-failure`（新生成用例）。普通回放默认保留失败 trace，每次有独立的完整日志、JSON 报告和现场附件。准备流程可通过 `--setup-description` 写入同一用例；无名图标/数字字段可扩展现有 `@规则`。完整命令和配置见[回放诊断与控件指南](docs/replay-debug-controls.md)。
+
 生成过程本身已用全新浏览器上下文跑通了用例（clean-replay），所以"生成通过"即"可回放通过"。产物在 `output/<run>/` 下，每个 run 目录自带一份极简 `playwright.config.ts`（`testDir: '.'`）——**进入该目录直接用 Playwright 跑即可**：
 
 ```bash
@@ -154,6 +156,7 @@ npx playwright test --ui                      # UI 模式
 
 - 生成的用例里 URL / Electron `executablePath` 都是**绝对路径**，可独立回放；但请在**本项目目录内**运行——用例 `import { test } from '@playwright/test'`，依赖仓库的 `node_modules`。
 - 从仓库根目录直接 `npx playwright test output/<run>/xxx.spec.ts` **不会命中**（根 `playwright.config.ts` 的 `testDir` 是 `./tests`）：请 `cd` 进 run 目录，或显式指定 `-c output/<run>/playwright.config.ts`。
+- 直接使用 Playwright 运行参数化用例时仍须注入 `PWGEN_PARAMS`；上述 `replay --config` 会代为完成。
 
 ## 架构
 
