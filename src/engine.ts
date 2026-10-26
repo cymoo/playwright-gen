@@ -60,6 +60,27 @@ export function splitSteps(description: string): Plan {
   return { preamble: description.slice(0, marks[0].index).trim(), steps };
 }
 
+/** Preparation is part of the same trajectory, never an unrecorded exploration hook. */
+export function buildPlan(description: string, setupDescription?: string): Plan {
+  const main = splitSteps(description);
+  if (!setupDescription?.trim()) return main;
+  const setup = splitSteps(setupDescription);
+  return {
+    preamble: [setup.preamble, main.preamble].filter(Boolean).join('\n'),
+    steps: [...setup.steps.map(step => ({ ...step, title: step.title === '任务' ? '准备' : `准备${step.title}` })), ...main.steps],
+  };
+}
+
+/** Give repairs the failing source neighborhood, not an entire helper-heavy spec. */
+export function repairContext(code: string, failure: string): string {
+  const lines = code.split('\n');
+  const match = failure.match(/test_generated\.spec\.ts:(\d+):\d+/);
+  const center = match ? Number(match[1]) - 1 : 0;
+  const start = Math.max(0, center - 8);
+  return lines.slice(start, Math.min(lines.length, match ? center + 9 : 40))
+    .map((line, i) => `${start + i + 1}: ${line}`).join('\n');
+}
+
 /**
  * 步骤描述是否含"预期结果"——含则 step_done 前必须有断言。
  * 保存/导出/下载类字样也算:产出文件的步骤必须有可回放的验证(click_and_save /
@@ -77,11 +98,11 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 1. 观察:操作类工具的返回里附带最新页面状态(可交互元素 ref 列表 + ARIA 树);需要时可调 get_page_state 重新观察。
 2. 操作:click / click_and_save / fill / check / uncheck / select_option / hover / press_key / scroll。普通控件优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))；设备/应用等参数目标必须用用户提供的参数占位符或含该占位符的完整名称，不要改用固定值或 ref。
 3. 等待:录制、加载、跳转等**耗时过程**,用 wait_for("<预期出现的文本>", timeout_seconds) 等待其完成,给足时间(如录制场景 120~300 秒)——不要反复 get_page_state 轮询,不要臆测已完成。
-4. 断言:用 assert_visible / assert_text / assert_url / assert_title 验证该步骤的预期结果;wait_for 等到目标也会作为断言记入用例。**这是测试的价值,不要只操作不断言**。
+4. 断言:用 assert_visible / assert_text / assert_value / assert_url / assert_title 验证该步骤的预期结果;wait_for 等到目标也会作为断言记入用例。输入框内容用 assert_value，不能用 assert_text 验证 value。**这是测试的价值,不要只操作不断言**。
 5. 该步骤全部完成且预期已断言后,调用 step_done(summary) 并停止。
 
 规则:
-- **只做当前步骤**:不要提前执行后续步骤的操作;也不要重复之前步骤已完成的操作(它们的效果仍然有效,如已登录、已连接的设备)。每一步先看当前真实状态,只做尚未完成的部分。
+- **只做当前步骤**:不要提前执行后续步骤，也不要重做已经完成的前置步骤。当前步骤要求建立的状态仍须录入操作，不能因为当前值碰巧正确而省略。
 - 一次只做一个动作,依据返回的真实状态推进,不要臆测看不到的元素。
 - 优先用 click 直接点击可见目标(按钮、标签、链接)。除非确实没有可点元素,否则不要用 press_key 的 Tab/Enter 做导航或激活——那样生成的用例很脆弱。
 - 开关/复选框:打开用 check,关闭用 uncheck(元素列表里标注了 [已选中]/[未选中]);若 check/uncheck 报不支持,改用 click 切换。
@@ -89,6 +110,8 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 - 若提示"未找到 / 匹配多个 / 无法唯一定位",先 get_page_state 看最新 ref,再改用具体 ref 或更精确的名称。
 - 下拉选择用 select_option;若它不适用(自定义下拉),点击展开后再点击选项。
 - 选择应用/设备后，断言应定位到已选控件或明确的已选区域，再验证其中包含参数值；不要仅在全页面搜索同一包名来证明选择成功。ARIA 中若显示 listitem/row 内包含标题和当前值，使用 assert_text(target=标题, text=参数引用, container_role="listitem" 或 "row") 验证整行；标题本身不包含旁边的当前值。不要重复同一歧义断言或随意取第一项。
+- 当前磁盘/设备状态可能来自上次运行。当前步骤要求选择应用、设备或配置时，即使当前值碰巧正确，也必须执行并记录能建立该状态的操作（原生 select/check/uncheck 是幂等的，自定义选择器应展开并重新选择目标）。先操作、再验证选择结果；不能在选择之前断言目标已选中。仅为了解初始值时使用 get_page_state，不要把预检查录成 assert_*。禁止通过删掉/放宽断言掩盖错误。
+- 邻近字段是 DOM 关联线索，不是真实 accessible name。优先使用 ref 或用户 @规则操作对应控件；重复字段必须限定范围。数字字段的单位与数值分开：100us 通常填数字 100，再按页面行为 Enter 或 Tab 提交，并用 assert_value 验证提交后的值。不要把单位填进 number input，也不要臆测单位换算。
 - 操作失败会返回失败原因,依据它调整策略:换更精确的目标、先 wait_for 等待、或改用其他操作。
 - 禁止任何形式的硬等待/轮询;需要等待就用 wait_for(它会连同超时记入用例)。
 - 本地环境工具:run_command 执行 shell 命令(交互式 CLI 用 stdin_lines 逐行输入,如 hdc shell);write_file 写入本地文件;read_file 读取文件内容用于观察(不记入用例)。run_command 与 write_file 成功后会记入用例并在回放时原样重放。仅在步骤明确要求命令行/文件操作时使用,UI 上能完成的操作必须在 UI 上做。`;
@@ -286,6 +309,17 @@ export function makeTools(ctx: ToolCtx): ToolSet {
           traj.add({ kind: 'assertText', target: d, text });
           return `断言通过:${target} 含文本 "${text}"。`;
         }),
+    }),
+
+    assert_value: tool({
+      description: '验证输入框/选择框的 value（不是文本内容）；应在 Enter/Tab 等必要提交操作后验证。timeout_seconds 默认 5，最长 600。',
+      inputSchema: z.object({ target: z.string(), value: z.string(), timeout_seconds: z.number().optional() }),
+      execute: async ({ target, value, timeout_seconds }) => guard(async () => {
+        const timeoutMs = Math.round(Math.min(Math.max(timeout_seconds ?? 5, 1), 600) * 1000);
+        const d = await session.assertValue(target, value, timeoutMs);
+        traj.add({ kind: 'assertValue', target: d, value, timeoutMs });
+        return `断言通过:${target} 的值为 ${value}。`;
+      }),
     }),
 
     assert_url: tool({
@@ -491,18 +525,19 @@ async function explore(
   const diagnosticPath = join(runDir, `exploration_round${round}.jsonl`);
   writeFileSync(diagnosticPath, '', 'utf8');
   console.log(`  [诊断] 工具调用与结果: ${diagnosticPath}`);
-  const config = configForDescription(opts.description, opts.config ?? loadConfig());
+  const config = configForDescription([opts.setupDescription, opts.description].filter(Boolean).join('\n'), opts.config ?? loadConfig());
   const session = new Session(opts.target, { headless, slowMo: headless ? 0 : 500, tracePath, ...config });
 
   const traj = new Trajectory();
   const summaries: string[] = [];
 
-  await session.start();
   try {
+    await session.start();
     if (opts.target.mode === 'web') {
       await session.goto(opts.target.url);
       traj.add({ kind: 'goto', url: opts.target.url });
     }
+    writeFileSync(join(runDir, `initial_state_round${round}.txt`), await session.snapshot(), 'utf8');
 
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
@@ -556,6 +591,7 @@ async function explore(
 export interface RunOpts {
   target: TargetSpec;
   description: string;
+  setupDescription?: string;
   outDir: string;
   name?: string;
   vision?: boolean;
@@ -568,12 +604,13 @@ export interface RunOpts {
 
 export async function run(opts: RunOpts, dependencies: { explore?: typeof explore } = {}): Promise<void> {
   const config = opts.config ?? loadConfig();
-  validateDescription(opts.description, config);
+  const fullDescription = [opts.setupDescription, opts.description].filter(Boolean).join('\n');
+  validateDescription(fullDescription, config);
   if (JSON.stringify(opts.target).includes('${')) throw new Error('入口 URL/应用路径暂不支持参数占位符，请直接通过 --url/--electron-bin 提供');
   const runDir = makeRunDir(opts.outDir, opts.name);
   const testPath = join(runDir, 'test_generated.spec.ts');
   writeRuntime(runDir);
-  const plan = splitSteps(opts.description);
+  const plan = buildPlan(opts.description, opts.setupDescription);
   const testName = opts.name?.trim() || opts.description.replace(/\s+/g, ' ').slice(0, 50);
 
   console.log(`[目标] ${opts.target.mode === 'web' ? opts.target.url : opts.target.bin}`);
@@ -602,7 +639,7 @@ export async function run(opts: RunOpts, dependencies: { explore?: typeof explor
 
     // Archive every attempt without Playwright's .spec suffix; a failed repair must
     // not overwrite a more complete earlier attempt or be collected as another test.
-    const code = renderTest(ex.traj, { testName, description: opts.description, target: opts.target });
+    const code = renderTest(ex.traj, { testName, description: fullDescription, target: opts.target });
     writeFileSync(join(runDir, `test_generated.round${round}.ts`), code, 'utf8');
     if (ex.summaries.length >= bestProgress) {
       writeFileSync(testPath, code, 'utf8');
@@ -618,22 +655,22 @@ export async function run(opts: RunOpts, dependencies: { explore?: typeof explor
       continue;
     }
 
-    const refError = referenceError(opts.description, ex.traj.steps, config);
+    const refError = referenceError(fullDescription, ex.traj.steps, config);
     if (refError) { replayHint = lastFailure = refError; continue; }
 
     console.log(opts.target.mode === 'electron'
       ? '[回放] 重新启动应用运行生成的用例（保留应用磁盘状态）…'
       : '[回放] 用全新上下文运行生成的用例…');
     const replayLog = join(runDir, `replay_round${round}.log`);
-    const { passed, output } = await runPlaywright(testPath, computeTimeout(ex.traj) + 60_000, config.params, replayLog);
+    const { passed, output, failureSummary, artifactsDir } = await runPlaywright(testPath, computeTimeout(ex.traj) + 60_000, config.params, replayLog);
     if (passed) {
       console.log(`\n✅ 全部 ${plan.steps.length} 个步骤完成,clean-replay 通过 → ${testPath}`);
       ex.summaries.forEach((s, i) => console.log(`  ${plan.steps[i].title}: ${s}`));
       return;
     }
-    lastFailure = `clean-replay 失败:\n${output}`;
-    replayHint = `上一轮生成的用例在干净回放时失败(探索时成功但重放不稳定)。本轮请优先选更稳定的定位/断言,耗时过程用 wait_for 并给足超时。${lastFailure}`;
-    console.log(`  ✗ ${lastFailure}\n  [诊断] 完整回放日志: ${replayLog}`);
+    lastFailure = `clean-replay 失败:\n${failureSummary ?? output}`;
+    replayHint = `上一轮用例回放失败。请检查失败断言之前是否已录制建立目标状态的操作，尤其不要依赖上次保留的已选应用/设备；当前值已正确也要明确录入选择流程。不能删除、放宽或扩大范围来掩盖断言失败。耗时过程用 wait_for。${lastFailure}\n失败附近的生成代码（保持动作与断言的因果顺序）:\n${repairContext(code, failureSummary ?? output)}`;
+    console.log(`  ✗ ${lastFailure}\n  [诊断] 完整回放日志: ${replayLog}\n  [诊断] 本次产物: ${artifactsDir}`);
   }
 
   process.exitCode = 1;

@@ -56,3 +56,4 @@ Electron 代码路径已实现并通过类型检查/单测，但仓库不含打�
 - `tests/reuse.spec.ts` 包含真实浏览器和生成用例回放测试；需要已安装 Chromium。
 - 0.2.1：参数目标可从快照控件名称推导保留模板的忠实定位；含样例值的 ref 候选继续尝试稳定候选，不降级为固定序号。普通工具失败允许换工具恢复，固定输入仍须纠正。探索诊断写入 `exploration_roundN.jsonl`；排查见 `docs/parameterized-exploration.md`。
 - 0.2.2：`assert_text.container_role` 用标题锚定唯一语义容器；执行/生成共用 container 描述符，不自动扩大到祖先或取首项。仅暴露描述显式引用的规则；label 排除内嵌表单控件文本，支持 placeholder 寻址。每轮保存源码与完整回放日志，失败时保留完成步骤最多的 spec。`tests/application-selection.spec.ts` 与 `tests/diagnostics.spec.ts` 覆盖现场结构及诊断保留。
+- 0.3.0：`replay --debug/--pause-on-failure` 保留参数并控制调试生命周期，每次独立日志/JSON/失败 trace；`--setup-description` 将准备步骤录入同一轨迹。title/css/field 描述符与 `assert_value` 执行和生成共用，`rules.locator` 扩展无名控件，禁止 CSS 插值。邻近字段不是 accname，歧义必须显式限定，详见 `docs/replay-debug-controls.md`。

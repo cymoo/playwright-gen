@@ -18,6 +18,9 @@ export interface SnapshotItem {
   testid: string;
   tag: string;
   type: string;
+  title?: string;
+  id?: string;
+  field?: { text: string; levels: number; tag: 'input' | 'textarea' | 'select'; unit?: string };
   sameKeyIndex: number; // 同 (role+name) 的第几个(0 基)
   sameKeyCount: number; // 同 (role+name) 的总数
   roleIndex: number; // 同 role 的第几个(0 基)
@@ -37,11 +40,14 @@ export function candidateDescriptors(item: SnapshotItem): LocatorDescriptor[] {
   const name = item.name || '';
   const isFormControl = item.tag === 'input' || item.tag === 'textarea' || item.tag === 'select';
   const out: LocatorDescriptor[] = [];
-  if (name) out.push({ kind: 'role', role, name });
+  if (name && role && role !== 'generic') out.push({ kind: 'role', role, name });
   if (isFormControl && name) out.push({ kind: 'label', text: name });
   if (item.placeholder) out.push({ kind: 'placeholder', text: item.placeholder });
   if (item.testid) out.push({ kind: 'testId', testId: item.testid });
-  out.push({ kind: 'role', role, nth: item.roleIndex });
+  if (item.title) out.push({ kind: 'title', text: item.title });
+  if (item.field) out.push({ kind: 'field', text: item.field.text, levels: item.field.levels, tag: item.field.tag });
+  if (item.id) out.push({ kind: 'css', selector: `[id=${JSON.stringify(item.id)}]` });
+  if (role && role !== 'generic') out.push({ kind: 'role', role, nth: item.roleIndex });
   return out;
 }
 
@@ -77,6 +83,15 @@ export function renderLocator(d: LocatorDescriptor, base = 'page', timeoutMs = 5
       break;
     case 'testId':
       expr = `${base}.getByTestId(${jsLit(d.testId)})`;
+      break;
+    case 'title':
+      expr = `${base}.getByTitle(${jsLit(d.text)}, { exact: true })`;
+      break;
+    case 'css':
+      expr = `${base}.locator(${jsLit(d.selector)})`;
+      break;
+    case 'field':
+      expr = `${base}.getByText(${jsLit(d.text)}, { exact: true }).locator(${jsLit('xpath=' + Array(d.levels).fill('..').join('/'))}).locator(${jsLit(d.tag === 'input' ? 'input:not([type=hidden])' : d.tag)})`;
       break;
     case 'container':
       expr = `${base}.getByRole(${jsLit(d.role)}).filter({ has: ${base}.getByText(${jsLit(d.text)}, { exact: true }) })`;

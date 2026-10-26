@@ -1,60 +1,114 @@
-/**
- * 用 @playwright/test 运行生成的用例并裁判(clean-replay)。
- *
- * 判定:`node <playwright CLI> test <file>` 的退出码,0=通过、非 0=失败。
- * 每个 run 目录自带一份极简 playwright.config.ts(testDir: '.'),
- * 以便脱离仓库根配置独立运行该目录下的生成用例,且拿到全新浏览器上下文。
- * 用例自身的超时由生成代码里的 test.setTimeout 控制(按轨迹计算,含长等待)。
- */
-
+/** Run a single spec without shell interpolation; retain an isolated diagnostic bundle. */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 
 const RUN_CONFIG = `import { defineConfig } from '@playwright/test';
-
-export default defineConfig({
-  testDir: '.',
-  reporter: 'line',
-  use: { trace: 'off' },
-});
+export default defineConfig({ testDir: '.', reporter: 'list' });
 `;
-
-function ensureRunConfig(dir: string): void {
-  const cfg = join(dir, 'playwright.config.ts');
-  if (!existsSync(cfg)) writeFileSync(cfg, RUN_CONFIG, 'utf-8');
+export type TraceMode = 'off' | 'on' | 'retain-on-failure';
+export interface RunOptions {
+  debug?: boolean;
+  pauseOnFailure?: boolean;
+  trace?: TraceMode;
+  /** Receives live stdout/stderr, while the complete output is also saved. */
+  onOutput?: (text: string) => void;
 }
-
 export interface RunResult {
   passed: boolean;
   output: string;
+  logPath?: string;
+  artifactsDir?: string;
+  reportPath?: string;
+  failureSummary?: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
 }
 
-export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Record<string, string> = {}, logPath?: string): Promise<RunResult> {
-  const dir = dirname(specFile);
-  const base = basename(specFile).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
-  ensureRunConfig(dir);
+interface ReportError { message?: string; stack?: string }
+interface ReportSuite {
+  file?: string;
+  suites?: ReportSuite[];
+  specs?: { file?: string; line?: number; title?: string;
+    tests?: { results?: { status?: string; errors?: ReportError[] }[] }[] }[];
+  errors?: ReportError[];
+}
+
+/** Read test errors directly, rather than relying on the tail of terminal output. */
+export function failureSummary(reportPath: string): string | undefined {
+  try {
+    const report = JSON.parse(readFileSync(reportPath, 'utf8')) as ReportSuite;
+    const failures: string[] = [];
+    const visit = (suite: ReportSuite) => {
+      for (const spec of suite.specs ?? []) {
+        for (const test of spec.tests ?? []) {
+          for (const result of test.results ?? []) {
+            if (['passed', 'skipped'].includes(result.status ?? '')) continue;
+            for (const error of result.errors ?? []) {
+              failures.push(`${spec.file ?? suite.file ?? ''}:${spec.line ?? ''} ${spec.title}\n${error.message ?? error.stack ?? JSON.stringify(error)}`);
+            }
+          }
+        }
+      }
+      for (const child of suite.suites ?? []) visit(child);
+    };
+    visit(report);
+    for (const error of report.errors ?? []) failures.push(error.message ?? error.stack ?? JSON.stringify(error));
+    return failures.length ? failures.join('\n\n') : undefined;
+  } catch { return undefined; }
+}
+
+export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Record<string, string> = {}, logPath?: string, options: RunOptions = {}): Promise<RunResult> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error('timeout 必须是有效的正数毫秒数');
+  const spec = resolve(specFile);
+  const dir = dirname(spec);
+  const interactive = !!(options.debug || options.pauseOnFailure || (process.env.PWDEBUG && process.env.PWDEBUG !== '0'));
+  const modernDebug = interactive && /^\/\/ pwgen-debug: 1$/m.test(readFileSync(spec, 'utf8'));
+  if (options.pauseOnFailure && !modernDebug) {
+    throw new Error('--pause-on-failure 需要支持失败暂停的新用例；请重新生成，旧用例仍可使用 --debug 单步检查');
+  }
+  const cfg = join(dir, 'playwright.config.ts');
+  if (!existsSync(cfg)) writeFileSync(cfg, RUN_CONFIG, 'utf8');
+  const artifactsRoot = join(dir, '.pwgen-replays');
+  mkdirSync(artifactsRoot, { recursive: true });
+  const artifactsDir = mkdtempSync(join(artifactsRoot, 'run-'));
+  const reportPath = join(artifactsDir, 'report.json');
+  const fullLog = join(artifactsDir, 'replay.log');
+  const logs = [...new Set([fullLog, ...(logPath ? [resolve(logPath)] : [])])];
+  for (const log of logs) { mkdirSync(dirname(log), { recursive: true }); writeFileSync(log, '', 'utf8'); }
   const packagePath = createRequire(import.meta.url).resolve('@playwright/test/package.json');
   const metadata = JSON.parse(readFileSync(packagePath, 'utf8')) as { bin: { playwright: string } };
   const cliPath = join(dirname(packagePath), metadata.bin.playwright);
-  if (logPath) writeFileSync(logPath, '', 'utf8');
+  const base = '(?:^|[/\\\\])' + basename(spec).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
+  const args = [cliPath, 'test', base, '--workers=1', '--retries=0', '--reporter=list,json', '-c', cfg,
+    '--output', join(artifactsDir, 'test-results'), '--trace', options.trace ?? 'retain-on-failure'];
+  if (options.debug) args.push('--debug');
+  else if (options.pauseOnFailure) args.push('--headed');
+  if (interactive) args.push('--global-timeout=0');
+  const env: NodeJS.ProcessEnv = { ...process.env, PWGEN_PARAMS: JSON.stringify(params),
+    PWGEN_DEBUG: interactive ? '1' : '0', PWGEN_PAUSE_ON_FAILURE: options.pauseOnFailure ? '1' : '0',
+    PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath, PLAYWRIGHT_LIST_PRINT_STEPS: '1', FORCE_COLOR: '0' };
+  delete env.NO_COLOR;
 
-  return new Promise((resolve) => {
+  return new Promise((complete) => {
     let timedOut = false;
-    const child = spawn(
-      process.execPath,
-      [cliPath, 'test', base, '--workers=1', '--reporter=line', '-c', 'playwright.config.ts'],
-      // Direct Node invocation avoids Windows shell interpolation of user-provided filenames.
-      { cwd: dir, env: { ...process.env, PWGEN_PARAMS: JSON.stringify(params) }, detached: process.platform !== 'win32' },
-    );
     let out = '';
+    let outputLength = 0;
     const collect = (text: string) => {
+      outputLength += text.length;
       out += text;
-      if (logPath) appendFileSync(logPath, text, 'utf8');
+      if (out.length > 1_000_000) out = out.slice(0, 500_000) + out.slice(-500_000);
+      for (const log of logs) appendFileSync(log, text, 'utf8');
+      options.onOutput?.(text);
     };
-    const timer = setTimeout(() => {
-      collect(`\n[playwright 超时,超过 ${timeoutMs}ms]`);
+    if (interactive && !modernDebug) {
+      collect('[调试] 旧用例可能显式设置了超时；需要时在脚本中临时设置 test.setTimeout(0)。\n');
+    }
+    const child = spawn(process.execPath, args, { cwd: dir, env, detached: process.platform !== 'win32',
+      stdio: [interactive ? 'inherit' : 'ignore', 'pipe', 'pipe'] });
+    const timer = interactive ? undefined : setTimeout(() => {
+      collect(`\n[playwright 超时,超过 ${timeoutMs}ms]\n`);
       timedOut = true;
       if (child.pid && process.platform === 'win32') {
         const killer = spawn('taskkill', ['/pid', String(child.pid), '/t', '/f']);
@@ -63,21 +117,23 @@ export function runPlaywright(specFile: string, timeoutMs = 120_000, params: Rec
         try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
       }
     }, timeoutMs);
-    child.stdout.on('data', (d) => collect(d.toString()));
-    child.stderr.on('data', (d) => collect(d.toString()));
-    child.on('close', (code) => {
+    // Decode across chunks so split UTF-8 characters do not corrupt saved diagnostics.
+    child.stdout!.setEncoding('utf8').on('data', d => collect(d));
+    child.stderr!.setEncoding('utf8').on('data', d => collect(d));
+    let finished = false;
+    const finish = (exitCode: number | null) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
-      resolve({ passed: !timedOut && code === 0, output: trimOutput(out) });
-    });
-    child.on('error', (e) => {
-      clearTimeout(timer);
-      collect(`启动 playwright 失败:${String(e)}`);
-      resolve({ passed: false, output: trimOutput(out) });
-    });
+      complete({ passed: !timedOut && exitCode === 0, output: trimOutput(out, outputLength), logPath: fullLog,
+        artifactsDir, reportPath, failureSummary: failureSummary(reportPath), exitCode, timedOut });
+    };
+    child.on('close', finish);
+    child.on('error', error => { collect(`启动 playwright 失败:${String(error)}\n`); finish(null); });
   });
 }
 
-function trimOutput(text: string, head = 1500, tail = 1500): string {
+function trimOutput(text: string, totalLength = text.length, head = 1500, tail = 1500): string {
   if (text.length <= head + tail) return text;
-  return text.slice(0, head) + `\n\n[... 省略 ${text.length - head - tail} 字符 ...]\n\n` + text.slice(-tail);
+  return text.slice(0, head) + `\n\n[... 省略 ${totalLength - head - tail} 字符，详见完整日志 ...]\n\n` + text.slice(-tail);
 }

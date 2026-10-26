@@ -8,7 +8,7 @@
  * 不会静默跳步),全部步骤生成进同一个用例文件(test.step 分块)。
  */
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 
 import { resolveElectronBinary } from './browser';
 import { loadConfig } from './config';
@@ -42,6 +42,7 @@ program
   .option('--electron-bin <path>', 'Electron 可执行文件路径(macOS 可传 .app,自动解析内部二进制)')
   .option('--electron-args <args>', 'Electron 启动参数(空格分隔)')
   .requiredOption('--description <text>', '自然语言场景描述;多步骤用"步骤1:… 步骤2:…"标注')
+  .option('--setup-description <text>', '每次运行先执行并录入用例的准备步骤（不清理应用磁盘数据）')
   .option('--config <path>', '复用配置 JSON: params 和 rules')
   .option('--out-dir <dir>', '输出目录', './output')
   .option('--name <name>', '本次运行名称(默认时间戳)')
@@ -56,6 +57,7 @@ program
       target,
       config: loadConfig(o.config),
       description: o.description,
+      setupDescription: o.setupDescription,
       outDir: o.outDir,
       name: o.name,
       vision: o.vision,
@@ -73,11 +75,15 @@ const replayProgram = new Command('replay')
   .option('--ext <extension>', '文件扩展名: pb 或 rdc')
   .option('--recursive', '递归扫描子目录', false)
   .option('--timeout <seconds>', '每个文件的外层超时秒数', '960')
+  .option('--debug', '使用 Playwright Inspector 单步调试（保留参数；不设外层超时）', false)
+  .option('--pause-on-failure', '失败后保留窗口并暂停检查（仅新生成用例）', false)
+  .addOption(new Option('--trace <mode>', '回放 trace 策略').choices(['off', 'on', 'retain-on-failure']).default('retain-on-failure'))
   .option('--report <path>', 'JSON 汇总路径', './replay-results.json')
   .action(async o => {
     const result = await replay({ spec: o.spec, params: loadConfig(o.config).params,
       inputDir: o.inputDir, ext: o.ext, recursive: o.recursive,
-      timeoutMs: Number(o.timeout) * 1000, report: o.report });
+      timeoutMs: Number(o.timeout) * 1000, report: o.report,
+      debug: o.debug, pauseOnFailure: o.pauseOnFailure, trace: o.trace });
     if (result.some(r => !r.passed)) process.exitCode = 1;
   });
 

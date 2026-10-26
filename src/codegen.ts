@@ -22,10 +22,31 @@ type ActionStep = Exclude<Step, { kind: 'stepStart' }>;
 
 const DEFAULT_ASSERT_MS = 5_000;
 
+/** Inline so even non-parameterized specs remain independently runnable. */
+const FAILURE_HELPER_TS = `async function captureFailure(page: import('@playwright/test').Page | undefined) {
+  if (!page || page.isClosed()) return;
+  try {
+    const path = test.info().outputPath('failure.png');
+    await page.screenshot({ path, timeout: 5000 });
+    await test.info().attach('failure-screenshot', { path, contentType: 'image/png' });
+  } catch {}
+  try { await test.info().attach('failure-state', { body: await page.locator('body').ariaSnapshot({ timeout: 5000 }), contentType: 'text/plain' }); } catch {}
+  if (process.env.PWGEN_PAUSE_ON_FAILURE === '1') {
+    console.error('[调试] 用例失败，窗口已暂停；检查后在 Inspector 点击 Resume，原始错误仍会使本次运行失败。');
+    await page.pause();
+  }
+}
+
+async function captureInitialState(page: import('@playwright/test').Page) {
+  try { await test.info().attach('initial-state', { body: await page.locator('body').ariaSnapshot({ timeout: 5000 }), contentType: 'text/plain' }); } catch {}
+}
+
+`;
+
 function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
   switch (s.kind) {
     case 'goto':
-      return `await page.goto(${jsLit(s.url)});`;
+      return `await page.goto(${jsLit(s.url)});\nawait captureInitialState(page);`;
     case 'click':
       return `await ${renderLocator(s.target)}.click();`;
     case 'clickSave': {
@@ -53,6 +74,8 @@ function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
     }
     case 'assertText':
       return `await expect(${renderLocator(s.target)}).toContainText(${jsLit(s.text)});`;
+    case 'assertValue':
+      return `await expect(${renderLocator(s.target, 'page', s.timeoutMs ?? DEFAULT_ASSERT_MS)}).toHaveValue(${jsLit(s.value)}, { timeout: ${s.timeoutMs ?? DEFAULT_ASSERT_MS} });`;
     case 'assertUrl':
       return `await expect(page).toHaveURL(new RegExp(${jsLit(s.pattern)}));`;
     case 'assertTitle':
@@ -81,7 +104,7 @@ export function computeTimeout(traj: Trajectory): number {
     if (s.kind === 'stepStart') continue;
     ms += 1_000;
     if ('target' in s && s.target?.kind === 'rule' && s.kind !== 'assertVisible') ms += DEFAULT_ASSERT_MS;
-    if (s.kind === 'assertVisible') ms += s.timeoutMs ?? DEFAULT_ASSERT_MS;
+    if (s.kind === 'assertVisible' || s.kind === 'assertValue') ms += s.timeoutMs ?? DEFAULT_ASSERT_MS;
     else if (s.kind.startsWith('assert')) ms += DEFAULT_ASSERT_MS;
     else if (s.kind === 'runCommand' || s.kind === 'clickSave') ms += s.timeoutMs;
   }
@@ -113,11 +136,11 @@ function renderGroups(groups: Group[], pad: string, mode: TargetSpec['mode']): s
   const lines: string[] = [];
   for (const g of groups) {
     if (g.title === undefined) {
-      for (const s of g.steps) lines.push(pad + renderStep(s, mode));
+      for (const s of g.steps) lines.push(...renderStep(s, mode).split('\n').map(line => pad + line));
     } else {
       lines.push(`${pad}await test.step(${jsLit(g.title)}, async () => {`);
       if (g.steps.length === 0) lines.push(`${pad}  // (该步骤未记录到操作)`);
-      for (const s of g.steps) lines.push(`${pad}  ${renderStep(s, mode)}`);
+      for (const s of g.steps) lines.push(...renderStep(s, mode).split('\n').map(line => `${pad}  ${line}`));
       lines.push(`${pad}});`);
     }
   }
@@ -174,7 +197,8 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
   const extra = nodeHelpers(traj);
   const semanticSteps = traj.steps.filter(s => s.kind !== 'stepStart');
   const requiredParams = [...new Set([...JSON.stringify(semanticSteps).matchAll(/\$\{([A-Za-z_]\w*)\}/g)].map(m => m[1]))];
-  const metadata = `// pwgen-parameters: ${JSON.stringify(requiredParams)}\n`;
+  const metadata = `// pwgen-parameters: ${JSON.stringify(requiredParams)}\n// pwgen-debug: 1\n`;
+  const timeoutCode = `test.setTimeout(${timeout});\n  if (process.env.PWGEN_DEBUG === '1' || (process.env.PWDEBUG && process.env.PWDEBUG !== '0')) test.setTimeout(0);`;
 
   const reusable = JSON.stringify([traj.steps, target, testName]).includes('${') || traj.steps.some(s => 'target' in s && s.target?.kind === 'rule');
   if (reusable) {
@@ -189,16 +213,25 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
       metadata + `import { test, expect, _electron as electron } from '@playwright/test';\n` +
       extra.imports +
       `\n` +
-      extra.helpers +
+      extra.helpers + FAILURE_HELPER_TS +
       docComment(description) +
       `test(${title}, async () => {\n` +
-      `  test.setTimeout(${timeout});\n` +
+      `  ${timeoutCode}\n` +
       `  const electronApp = await electron.launch({ executablePath: ${jsLit(target.bin)}, args: ${argsLit} });\n` +
+      `  let failedPage: import('@playwright/test').Page | undefined;\n` +
+      `  let failed = false;\n` +
       `  try {\n` +
       `    const page = await electronApp.firstWindow();\n` +
+      `    failedPage = page;\n` +
+      `    await page.waitForLoadState('domcontentloaded');\n` +
+      `    await captureInitialState(page);\n` +
       `${renderGroups(groups, '    ', 'electron')}\n` +
+      `  } catch (error) {\n` +
+      `    failed = true;\n` +
+      `    await captureFailure(failedPage).catch(() => {});\n` +
+      `    throw error;\n` +
       `  } finally {\n` +
-      `    await electronApp.close();\n` +
+      `    try { await electronApp.close(); } catch (error) { if (!failed) throw error; }\n` +
       `  }\n` +
       `});\n`
     );
@@ -208,11 +241,16 @@ export function renderTest(traj: Trajectory, opts: RenderOpts): string {
     metadata + `import { test, expect } from '@playwright/test';\n` +
     extra.imports +
     `\n` +
-    extra.helpers +
+    extra.helpers + FAILURE_HELPER_TS +
     docComment(description) +
     `test(${title}, async ({ page }) => {\n` +
-    `  test.setTimeout(${timeout});\n` +
-    `${renderGroups(groups, '  ', 'web')}\n` +
+    `  ${timeoutCode}\n` +
+    `  try {\n` +
+    `${renderGroups(groups, '    ', 'web')}\n` +
+    `  } catch (error) {\n` +
+    `    await captureFailure(page).catch(() => {});\n` +
+    `    throw error;\n` +
+    `  }\n` +
     `});\n`
   );
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- 回放实时显示步骤和错误，每次保留独立完整日志、Playwright JSON 报告与附件；默认保留失败 trace，并提取结构化错误用于自动修复。
+- 新增 `replay --debug` / `--pause-on-failure`，保留参数、解除交互调试总超时，在关闭 Electron 前保存现场与暂停，恢复后仍返回原始失败。旧脚本的能力边界明确提示。
+- 新增 `--setup-description`，准备步骤与主流程共用探索、轨迹和回放；记录初始状态，并约束先建立选择状态再断言，不删除或放宽失败断言。
+- 修复 number/range/search/password 的角色识别；补充 title、稳定 ID、值/约束与邻近字段线索，扩展同一描述符的执行和生成，歧义关联不固化为序号。
+- 现有 `@规则` 兼容新增 locator 格式，支持 title/testId/css/role/label/placeholder/text；CSS/scope 禁止参数插值，默认唯一匹配。
+- 新增 `assert_value`，验证提交后的输入值，支持超时；补充真实浏览器生成回放、诊断留存和调试生命周期回归。用法与审查记录见 `docs/replay-debug-controls.md`。
+
 ## 0.2.2
 
 - 新增显式 `assert_text.container_role`：按标题定位唯一的 listitem/row/group/region 并验证该容器内容，解决标题与当前值为兄弟节点、已选摘要与搜索结果包名重复时的断言失败。探索与生成代码使用同一定位，拒绝多行歧义。

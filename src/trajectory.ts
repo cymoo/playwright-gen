@@ -18,6 +18,9 @@ export type LocatorDescriptor =
   | { kind: 'label'; text: string; exact?: boolean; nth?: number }
   | { kind: 'placeholder'; text: string; nth?: number }
   | { kind: 'testId'; testId: string; nth?: number }
+  | { kind: 'title'; text: string; nth?: never }
+  | { kind: 'css'; selector: string; nth?: never }
+  | { kind: 'field'; text: string; levels: number; tag: 'input' | 'textarea' | 'select'; nth?: never }
   | { kind: 'container'; role: ContainerRole; text: string; nth?: never }
   | { kind: 'text'; text: string; exact?: boolean; visible?: true; nth?: number };
 
@@ -41,6 +44,7 @@ export type Step =
   | { kind: 'press'; target?: LocatorDescriptor; key: string }
   | { kind: 'assertVisible'; target: LocatorDescriptor; timeoutMs?: number }
   | { kind: 'assertText'; target: LocatorDescriptor; text: string }
+  | { kind: 'assertValue'; target: LocatorDescriptor; value: string; timeoutMs?: number }
   | { kind: 'assertUrl'; pattern: string }
   | { kind: 'assertTitle'; pattern: string }
   | { kind: 'runCommand'; command: string; stdin?: string[]; timeoutMs: number }
