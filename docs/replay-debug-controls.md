@@ -55,6 +55,8 @@ npx tsx src/cli.ts --electron-bin /path/to/application --config reuse.json \
 
 快照新增 title、稳定 ID、输入值、min/max/step 和 disabled/readonly。数字框是 `spinbutton`，range 是 `slider`，search 是 `searchbox`，password 不伪造 textbox 角色。带 title/testId/ARIA 名称和可聚焦特征的非标准入口也会进入候选列表；这并不保证装饰元素有点击行为。
 
+placeholder 单独标注和匹配，不冒充 accessible name，也不会让提示文本与有名称按钮产生伪歧义；fill/value 面向匹配的表单控件，press 仍可明确针对按钮。
+
 无名输入框可显示：
 
 ```text
@@ -105,6 +107,6 @@ spinbutton "(无名)" [邻近字段: "Poll interval" (非 accessible name); 单�
 - 不把 fill 成功当最终值正确；失焦校正后的错误值仍然失败。
 - 调试不丢参数、不被外层超时杀掉；暂停必须早于 close，恢复后仍失败。
 - 每次诊断独立；结构化错误不会被终端摘要截断隐藏。
-- 实现后审查修正：带 testId 的字段外层容器不得抢占 fill/press/value 的真实控件；重复 title 的标准按钮也禁止序号回退；CSS 插值在配置和可分发运行时双重拒绝；启动途中失败也清理会话。
+- 实现后审查修正：带 testId 的字段外层容器不得抢占 fill/press/value 的真实控件，按键仍保留命名按钮优先于同名输入提示的语义；重复 title 的标准按钮也禁止序号回退；CSS 插值在配置和可分发运行时双重拒绝；启动途中失败也清理会话。
 
 浏览器测试覆盖字段插入与换参后的真实生成回放、重复控件、输入提交校正、诊断文件保留和调试生命周期。Electron 关闭/暂停顺序使用真实 Chromium 页面与测试 launcher 验证，仓库没有 Graphics Profiler 的 Windows 二进制，不能替代真实设备录制验收。

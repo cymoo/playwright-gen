@@ -58,6 +58,22 @@ test('带 testId 的字段容器不会抢占数字框的 fill/press/value 操作
   await session.assertValue('Poll interval', '100', 500);
 });
 
+test('按键保持命名按钮优先，填写仍定位同名 placeholder 的表单控件', async ({ page }) => {
+  await page.setContent('<button aria-label="Run" onclick="document.querySelector(\'output\').textContent=\'button\'">执行</button><input placeholder="Run"><output></output>');
+  const session = sessionFor(page);
+  await session.snapshot();
+  await session.press('Enter', 'Run');
+  await expect(page.locator('output')).toHaveText('button');
+  await session.fill('Run', 'typed');
+  await expect(page.locator('input')).toHaveValue('typed');
+  const parameterized = new Session({ mode: 'web', url: 'about:blank' }, { headless: true, params: { label: 'Run' } });
+  parameterized.page = page;
+  await parameterized.snapshot();
+  await parameterized.press('Enter', '${label}');
+  await parameterized.fill('${label}', 'next');
+  await expect(page.locator('input')).toHaveValue('next');
+});
+
 test('同名邻近字段不擅自选第一个；稳定 ID 仍可通过显式规则定位', async ({ page }) => {
   await page.setContent('<section><span>Poll interval</span><input id="gpu-poll" type="number"></section><section><span>Poll interval</span><input type="number"></section>');
   const session = sessionFor(page);

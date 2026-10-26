@@ -88,7 +88,8 @@ function snapshotScript(sel: string): string {
     if (el.id) { try { const lbl = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (lbl) return labelText(lbl); } catch (e) {} }
     const wrap = el.closest('label'); if (wrap) return labelText(wrap);
     const tag = el.tagName.toLowerCase();
-    if (tag === 'input' || tag === 'textarea' || tag === 'select') return (el.getAttribute('placeholder') || '').trim();
+    // Placeholder is a separate hint, not the control's accessible name.
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return (el.getAttribute('title') || '').trim();
     return (el.textContent || '').trim();
   };
   // A nearby label is evidence, never an invented accessible name. Only accept a
@@ -319,7 +320,7 @@ export class Session {
         title: it.title || '', field: it.field?.text || '',
         formControl: ['input', 'textarea', 'select'].includes(it.tag) || ['textbox', 'searchbox'].includes(it.role),
         candidates: candidateDescriptors(it) });
-      const shown = it.name || it.placeholder || it.title || '(无名)';
+      const shown = it.name || it.title || '(无名)';
       const checkable = it.role === 'checkbox' || it.role === 'radio' || it.role === 'switch';
       const state = checkable ? (it.checked ? ' [已选中]' : ' [未选中]') : '';
       const placeholder = it.placeholder && it.placeholder !== shown ? ` [placeholder: "${it.placeholder}"]` : '';
@@ -389,8 +390,12 @@ export class Session {
       // Parameters may identify an accessible name, not a standalone DOM text node.
       // Use the same faithful candidates as ordinary targets, retaining the explicit template.
       const refs = matchingRefs(value);
-      const exact = refs.filter(r => r.name === value);
-      const matches = exact.length ? exact : refs.filter(r => r.name.includes(value));
+      let matches: Ref[] = [];
+      for (const field of ['name', 'placeholder', 'title', 'field'] as const) {
+        const exact = refs.filter(r => r[field] === value);
+        matches = exact.length ? exact : refs.filter(r => r[field].includes(value));
+        if (matches.length) break;
+      }
       if (matches.length > 1) {
         throw new ResolveError(`参数目标 "${t}" 匹配多个可交互元素，请用包含参数的完整名称或 @规则限定范围。`);
       }
@@ -575,7 +580,12 @@ export class Session {
 
   async press(key: string, target?: string): Promise<LocatorDescriptor | undefined> {
     if (target) {
-      const { locator, descriptor } = await this.resolve(target, ASSERT_TIMEOUT, true);
+      // Unlike fill/value, a key can explicitly target a named button. Do not let
+      // an input's placeholder or nearby label override that semantic target.
+      const low = paramText(target, this.opts.params ?? {}).trim().toLowerCase();
+      const namedAction = low && [...this.refs.values()].some(r => !r.formControl && r.role &&
+        r.role !== 'generic' && r.name.toLowerCase().includes(low));
+      const { locator, descriptor } = await this.resolve(target, ASSERT_TIMEOUT, !namedAction);
       await locator.press(paramText(key, this.opts.params ?? {}), { timeout: ACTION_TIMEOUT });
       return descriptor;
     }
