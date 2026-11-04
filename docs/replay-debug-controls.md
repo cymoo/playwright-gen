@@ -95,7 +95,7 @@ spinbutton "(无名)" [邻近字段: "Poll interval" (非 accessible name); 单�
 把 @gpuPollInterval 设为 ${pollUs}，按 Tab 提交，预期输入框的值为 ${pollUs}。
 ```
 
-`assert_value` 工具使用 `toHaveValue`，可设置等待超时，并在探索和回放使用相同定位。数值和单位分开处理：100us 一般填 100，再按应用要求提交，最后验证 value；不能用 `toContainText` 检查输入值。导入按钮后的原生打开文件对话框仍需要应用适配，识别按钮不等于已支持原生文件选择。
+`assert_value` 工具使用 `toHaveValue`，可设置等待超时，并在探索和回放使用相同定位。数值和单位分开处理：100us 一般填 100，再按应用要求提交，最后验证 value；不能用 `toContainText` 检查输入值。导入按钮后的文件选择使用 `click_and_open`，支持 Electron 原生 `dialog.showOpenDialog(Sync)` 与网页文件选择器，详见 [本地文件导入](local-file-import.md)。
 
 能修改被测应用时，优先补 `<button aria-label="...">`、`data-testid` 或 `label[for]`/`aria-labelledby`，减少人工规则。本次交付使用配置补充控件，未引入可视化点选器或坐标回放。
 

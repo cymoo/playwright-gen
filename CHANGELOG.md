@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- 新增 `click_and_open`：支持 Electron `dialog.showOpenDialog(Sync)` 与网页 `filechooser`，选择已有本地文件，解决 Import file 被误用为下载/保存而卡住的问题。
+- 导入操作执行与生成共用实现，保留 `${rdcPath}/${rdcName}` / `${inputFile}` 参数；支持绝对路径与相对 run 目录路径，检查文件存在，不删除或改写源文件。
+- 文件选择后、失败或超时恢复 Electron 对话框方法并移除监听；真实选择才记录轨迹，页面预期仍需单独断言，选择超时计入回放预算。
+- 新增真实浏览器换参回放、失败恢复与可选真实 Electron 异步/同步对话框集成回归；配置与支持边界见 `docs/local-file-import.md`。
+
 ## 0.3.0
 
 - 回放实时显示步骤和错误，每次保留独立完整日志、Playwright JSON 报告与附件；默认保留失败 trace，并提取结构化错误用于自动修复。

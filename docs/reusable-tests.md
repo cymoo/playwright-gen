@@ -138,7 +138,7 @@
 步骤2：等待当前文件加载完成，验证 @currentFile，并验证 Timeline 中本文件的有效数据出现。
 ```
 
-`replay` 不负责导入文件、不自动操纵原生“打开文件”对话框，也不清理应用磁盘缓存。若应用只暴露原生打开对话框，需要先提供可自动操作的导入入口，或单独实现并验证适配器。不要直接用整个目录跑一个尚未验证的导入流程。
+`replay` 按生成用例重演导入：描述中明确点击 Import file 并打开 `${inputFile}`，探索会用 `click_and_open` 记录文件选择，支持 Electron `dialog.showOpenDialog(Sync)` 与网页文件选择器。目录扫描只负责逐文件注入参数，不会自动补充用例里没有的导入动作，也不清理应用磁盘缓存。先验证单文件导入和预期页面，再批量回放；详见 [本地文件导入](local-file-import.md)。
 
 生成示例（POSIX shell，单引号保护占位符不被 shell 展开；Windows PowerShell 同样使用单引号，cmd 用双引号）：
 

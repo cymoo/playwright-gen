@@ -31,6 +31,7 @@ import { basename, dirname, join } from 'node:path';
 import { paramText, resolveRule, waitRule, timeBudget, literalReferenceError, type Params, type Rule } from './runtime';
 import type { ContainerRole, LocatorDescriptor, TargetSpec } from './trajectory';
 import { candidateDescriptors, type SnapshotItem } from './locators';
+import { clickAndOpen } from './file-open';
 
 const INTERACTIVE_SELECTOR =
   'button,[role=button],a[href],[role=link],input:not([type=hidden]),' +
@@ -499,6 +500,13 @@ export class Session {
   async click(target: string): Promise<LocatorDescriptor> {
     const { locator, descriptor } = await this.resolve(target);
     await locator.click({ timeout: ACTION_TIMEOUT });
+    return descriptor;
+  }
+
+  async clickAndOpen(target: string, filePath: string, runDir: string, timeoutMs: number): Promise<LocatorDescriptor> {
+    const { locator, descriptor } = await this.resolve(target);
+    await clickAndOpen(this.page, this.electronApp, locator,
+      paramText(filePath, this.opts.params ?? {}), runDir, timeoutMs);
     return descriptor;
   }
 

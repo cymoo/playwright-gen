@@ -19,6 +19,7 @@
 | `runner.ts` | `runPlaywright`：`playwright test` 裁判（每 run 目录自带极简 config，testDir `.`；通过 Node 直接启动 Playwright CLI，避免文件名 shell 插值） |
 | `models.ts` | deepseek / qwen：`createOpenAICompatible` + env；`envMaxSteps` |
 | `vision.ts` | `describeScreenshot`：Qwen 看图返回文本（file part） |
+| `file-open.ts` | `clickAndOpen`：已有本地文件导入，Electron 原生打开对话框与网页 filechooser；codegen 序列化同一函数，保持自包含（局部函数用内联回调/对象方法，避免转译器命名 helper 泄漏） |
 
 ## 关键技术决策
 
@@ -48,6 +49,8 @@ npx playwright test tests/unit.spec.ts     # 纯逻辑单测（splitSteps / loca
 Electron 代码路径已实现并通过类型检查/单测，但仓库不含打包二进制，需用真实应用本地验证。
 
 ## 可复用用例（0.2.0）
+
+- 0.3.1：`click_and_open(target, file_path)` 在点击前接管 Electron `dialog.showOpenDialog(Sync)` / 网页 filechooser；允许绝对路径与相对 run 目录路径，选择后/失败时恢复方法与监听，不删除源文件。`clickOpen` 轨迹保留参数并计入超时，不能代替页面预期断言。详见 `docs/local-file-import.md`；`PWGEN_TEST_ELECTRON_BIN` 可启用真实 Electron 集成测试。
 
 - `config.ts` 校验 params/rules；`runtime.ts` 提供参数解析和 scope + exact/numberSuffix + unique/first/index 规则，复制为生成目录的 `pwgen-runtime.ts`，执行与回放共用实现。
 - 描述中 `${name}` 和 `@rule` 必须保持显式引用，不得把样例值固化；规则写入轨迹，回放只覆盖参数。

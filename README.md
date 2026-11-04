@@ -81,6 +81,18 @@ npx tsx src/cli.ts --url "http://localhost:8080" --description "\
 - `read_file`：读取文件内容供模型观察判断，不记入用例。
 - 相对路径统一相对本次 run 目录解析（生成的用例按 spec 所在目录解析，两边一致）；生成用例所需的 `node:` import 与辅助函数**按需注入**，纯 UI 用例产物不变。
 
+### 打开 / 导入本地文件
+
+步骤要求点击 Import file 并选择指定文件时，Agent 使用 `click_and_open(target, file_path)`。例如原描述中的“选择 `${rdcPath}` 目录下的 `${rdcName}` 文件打开”会保留为 `${rdcPath}/${rdcName}`；也支持 `${inputFile}` 完整路径。无需额外提供 PowerShell 或按键脚本。
+
+- **Electron**：点击前接管主进程 `dialog.showOpenDialog` / `showOpenDialogSync`，返回指定文件；选择后或失败时恢复原方法。
+- **web / Electron 文件输入框**：点击前监听 `filechooser`，使用 `setFiles` 选择文件，支持按钮触发的隐藏文件输入框。
+- 源文件必须存在且为文件；允许绝对路径，相对路径按本次 run 目录解析。不会删除或改写源文件。
+- 工具仅在捕获到文件选择后记录操作；导入后仍须用 `wait_for` / `assert_*` 验证 Explorer 等预期结果。文件选择超时可设 1–600s，加载等待另用 `wait_for`。
+- 普通 `click` 用于进入 Open file 页面；对实际弹出文件选择器的 Import file 按钮使用 `click_and_open`。`click_and_save` 用于产生新文件。
+
+完整配置、回放和支持边界见 [本地文件导入](docs/local-file-import.md)。
+
 ### 保存 / 导出文件（下载与原生保存对话框）
 
 步骤里要求"点击保存，把 xxx.csv 保存到当前路径"时，Agent 用 `click_and_save`（而非普通 click）完成：

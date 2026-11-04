@@ -96,7 +96,7 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 
 工作循环:
 1. 观察:操作类工具的返回里附带最新页面状态(可交互元素 ref 列表 + ARIA 树);需要时可调 get_page_state 重新观察。
-2. 操作:click / click_and_save / fill / check / uncheck / select_option / hover / press_key / scroll。普通控件优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))；设备/应用等参数目标必须用用户提供的参数占位符或含该占位符的完整名称，不要改用固定值或 ref。
+2. 操作:click / click_and_open / click_and_save / fill / check / uncheck / select_option / hover / press_key / scroll。普通控件优先用 ref(如 click("e3")),也可用可见名称(click("打开设置"))；设备/应用等参数目标必须用用户提供的参数占位符或含该占位符的完整名称，不要改用固定值或 ref。
 3. 等待:录制、加载、跳转等**耗时过程**,用 wait_for("<预期出现的文本>", timeout_seconds) 等待其完成,给足时间(如录制场景 120~300 秒)——不要反复 get_page_state 轮询,不要臆测已完成。
 4. 断言:用 assert_visible / assert_text / assert_value / assert_url / assert_title 验证该步骤的预期结果;wait_for 等到目标也会作为断言记入用例。输入框内容用 assert_value，不能用 assert_text 验证 value。**这是测试的价值,不要只操作不断言**。
 5. 该步骤全部完成且预期已断言后,调用 step_done(summary) 并停止。
@@ -107,6 +107,7 @@ const AGENT_SYSTEM = `你是 UI 测试探索 Agent,在真实浏览器/应用里"
 - 优先用 click 直接点击可见目标(按钮、标签、链接)。除非确实没有可点元素,否则不要用 press_key 的 Tab/Enter 做导航或激活——那样生成的用例很脆弱。
 - 开关/复选框:打开用 check,关闭用 uncheck(元素列表里标注了 [已选中]/[未选中]);若 check/uncheck 报不支持,改用 click 切换。
 - **保存/导出/下载文件的按钮用 click_and_save**(指定保存文件名),不要用 click:下载产物和操作系统的原生保存对话框都不在页面里,普通 click 拿不到文件;click_and_save 会自动接住下载/原生对话框并把文件落到指定路径,文件真实生成才算成功——它同时就是该步骤"文件已保存"的验证。不要尝试与原生保存对话框交互。
+- **打开/导入/上传已有本地文件必须用 click_and_open(target, file_path)**，例如点击 Import file 并选择目录参数下的文件时，file_path 保留为 "\${rdcPath}/\${rdcName}"。该工具点击前接管 Electron 原生打开对话框或网页文件选择器，不需要也不能在 DOM 中寻找原生文件名输入框；不要用 click_and_save（它用于生成新文件）、PowerShell、剪贴板或按键脚本来导入。若先有 Open file 页面入口，先用 click 进入，再对实际触发文件选择的 Import file 按钮用 click_and_open。工具成功仅表示已选择文件，仍须 wait_for/assert_* 验证 Explorer 等预期结果。
 - 若提示"未找到 / 匹配多个 / 无法唯一定位",先 get_page_state 看最新 ref,再改用具体 ref 或更精确的名称。
 - 下拉选择用 select_option;若它不适用(自定义下拉),点击展开后再点击选项。
 - 选择应用/设备后，断言应定位到已选控件或明确的已选区域，再验证其中包含参数值；不要仅在全页面搜索同一包名来证明选择成功。ARIA 中若显示 listitem/row 内包含标题和当前值，使用 assert_text(target=标题, text=参数引用, container_role="listitem" 或 "row") 验证整行；标题本身不包含旁边的当前值。不要重复同一歧义断言或随意取第一项。
@@ -143,7 +144,7 @@ export function makeTools(ctx: ToolCtx): ToolSet {
   // Ordinary tool failures may be recovered through a different tool (custom selects, etc.).
   const pendingFailures = new Set<string>();
   const unrecoveredFailures = new Map<string, string>();
-  const actionTools = new Set(['click', 'click_and_save', 'fill', 'check', 'uncheck',
+  const actionTools = new Set(['click', 'click_and_open', 'click_and_save', 'fill', 'check', 'uncheck',
     'select_option', 'hover', 'press_key', 'run_command', 'write_file']);
 
   const withState = async (msg: string) => `${msg}\n\n${await session.snapshot()}`;
@@ -175,11 +176,26 @@ export function makeTools(ctx: ToolCtx): ToolSet {
         }),
     }),
 
+    click_and_open: tool({
+      description: '点击直接触发打开/导入/上传本地文件的按钮（如 Import file），自动选择 file_path。' +
+        '支持 Electron dialog.showOpenDialog(Sync) 和网页 filechooser；不操作原生窗口，不删除或改写源文件。' +
+        'file_path 可为绝对路径或相对本次 run 目录的路径，必须保留用户参数（如 ${rdcPath}/${rdcName} 或 ${inputFile}）。' +
+        '源文件须存在；文件选择成功才记录，之后仍须验证应用的预期页面。timeout_seconds 默认 60、最长 600。',
+      inputSchema: z.object({ target: z.string(), file_path: z.string().min(1), timeout_seconds: z.number().optional() }),
+      execute: async ({ target, file_path, timeout_seconds }) =>
+        guard(async () => {
+          const ms = Math.round(Math.min(Math.max(timeout_seconds ?? 60, 1), 600) * 1000);
+          const d = await session.clickAndOpen(target, file_path, ctx.runDir, ms);
+          traj.add({ kind: 'clickOpen', target: d, path: file_path, timeoutMs: ms });
+          return withState(`已点击并选择本地文件:${file_path}。请继续验证导入后的预期结果。`);
+        }),
+    }),
+
     click_and_save: tool({
       description:
         '点击会触发"保存文件/下载"的元素(保存/导出/下载类按钮)并把产物保存为 save_as(文件名或相对路径,必须位于本次运行目录内;要求"保存在当前路径"就直接写文件名)。' +
         '自动接住下载事件与 Electron 原生保存对话框——原生对话框不在页面里,你看不到也点不到,所以这类点击必须用本工具而不是 click。' +
-        '若目标文件已存在会先删除,文件真实落盘才算成功并记入用例,回放时重演点击并断言文件生成。timeout_seconds 默认 60、最长 600。',
+        '仅用于产生新文件；打开/导入/上传已有文件用 click_and_open。若目标文件已存在会先删除,文件真实落盘才算成功并记入用例,回放时重演点击并断言文件生成。timeout_seconds 默认 60、最长 600。',
       inputSchema: z.object({
         target: z.string(),
         save_as: z.string(),
