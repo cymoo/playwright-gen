@@ -30,12 +30,15 @@ export type LocatorDescriptor =
  * 记录真正成功执行过的 shell 命令(含喂给 stdin 的行)与文件写入,回放时原样重放。
  * clickSave 是"点击触发保存/下载并把产物落到 path"的复合步骤:探索时文件真实
  * 落盘才记录,回放时重演点击并断言文件生成(path 相对 run 目录)。
+ * clickOpen 是点击并选择已有文件:捕获文件选择才记录,保留 path 参数模板;
+ * 允许绝对路径与相对 run 目录路径,不能代替导入后的页面预期断言。
  */
 export type Step =
   | { kind: 'stepStart'; title: string }
   | { kind: 'goto'; url: string }
   | { kind: 'click'; target: LocatorDescriptor }
   | { kind: 'clickSave'; target: LocatorDescriptor; path: string; timeoutMs: number }
+  | { kind: 'clickOpen'; target: LocatorDescriptor; path: string; timeoutMs: number }
   | { kind: 'fill'; target: LocatorDescriptor; value: string }
   | { kind: 'check'; target: LocatorDescriptor }
   | { kind: 'uncheck'; target: LocatorDescriptor }

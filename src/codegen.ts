@@ -9,12 +9,13 @@
  * 多步骤描述生成**一个用例文件**:stepStart 标记把动作分进 test.step() 块。
  * 稳健性内建:web-first 断言 + 自动等待,绝不输出硬 sleep;长等待用带 timeout 的
  * toBeVisible;test.setTimeout 按轨迹(动作数 + 各断言超时 + 命令超时)自动计算。
- * runCommand / writeFile / clickSave 步骤所需的 node: import 与辅助函数按需注入
- * (见 shell.ts / browser.ts),纯 UI 轨迹的产物与不含此能力时完全一致。
+ * runCommand / writeFile / clickSave / clickOpen 所需的 node: import 与辅助函数按需注入
+ * (见 shell.ts / browser.ts / file-open.ts),纯 UI 轨迹的产物与不含此能力时完全一致。
  */
 
 import type { Step, TargetSpec, Trajectory } from './trajectory';
 import { SAVE_HELPER_TS } from './browser';
+import { OPEN_HELPER_TS } from './file-open';
 import { jsLit, renderLocator } from './locators';
 import { SHELL_HELPER_TS, WRITE_HELPER_TS } from './shell';
 
@@ -52,6 +53,10 @@ function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
     case 'clickSave': {
       const app = mode === 'electron' ? 'electronApp' : 'undefined';
       return `await clickAndSave(page, ${app}, ${renderLocator(s.target)}, ${jsLit(s.path)}, ${s.timeoutMs});`;
+    }
+    case 'clickOpen': {
+      const app = mode === 'electron' ? 'electronApp' : 'undefined';
+      return `await clickAndOpen(page, ${app}, ${renderLocator(s.target)}, ${jsLit(s.path)}, dirname(test.info().file), ${s.timeoutMs});`;
     }
     case 'fill':
       return `await ${renderLocator(s.target)}.fill(${jsLit(s.value)});`;
@@ -96,7 +101,7 @@ function renderStep(s: ActionStep, mode: TargetSpec['mode']): string {
 /**
  * 按轨迹计算用例超时:基础 30s + 每个动作 1s + 各断言的完整超时预算
  * (wait_for 的长等待在回放时会真实发生,如等录制结束,必须计入)+
- * 各 runCommand / clickSave 的完整超时预算(命令与文件保存回放时同样真实发生)。上限 15 分钟。
+ * 各 runCommand / clickSave / clickOpen 的完整超时预算。上限 15 分钟。
  */
 export function computeTimeout(traj: Trajectory): number {
   let ms = 30_000;
@@ -106,7 +111,7 @@ export function computeTimeout(traj: Trajectory): number {
     if ('target' in s && s.target?.kind === 'rule' && s.kind !== 'assertVisible') ms += DEFAULT_ASSERT_MS;
     if (s.kind === 'assertVisible' || s.kind === 'assertValue') ms += s.timeoutMs ?? DEFAULT_ASSERT_MS;
     else if (s.kind.startsWith('assert')) ms += DEFAULT_ASSERT_MS;
-    else if (s.kind === 'runCommand' || s.kind === 'clickSave') ms += s.timeoutMs;
+    else if (s.kind === 'runCommand' || s.kind === 'clickSave' || s.kind === 'clickOpen') ms += s.timeoutMs;
   }
   return Math.min(ms, 900_000);
 }
@@ -156,27 +161,30 @@ function docComment(description: string): string {
   return lines.join('\n') + '\n';
 }
 
-/** runCommand / writeFile / clickSave 步骤所需的 node: import 与辅助函数,仅在轨迹用到时注入。 */
+/** 本地命令/文件步骤所需的 node: import 与辅助函数,仅在轨迹用到时注入。 */
 function nodeHelpers(traj: Trajectory): { imports: string; helpers: string } {
   const hasCmd = traj.steps.some((s) => s.kind === 'runCommand');
   const hasWrite = traj.steps.some((s) => s.kind === 'writeFile');
   const hasSave = traj.steps.some((s) => s.kind === 'clickSave');
+  const hasOpen = traj.steps.some((s) => s.kind === 'clickOpen');
   const imports: string[] = [];
   const helpers: string[] = [];
   if (hasCmd) imports.push(`import { spawn } from 'node:child_process';`);
   const fsNames = [
+    hasOpen && 'statSync',
     hasSave && 'existsSync',
     (hasWrite || hasSave) && 'mkdirSync',
     hasSave && 'rmSync',
     hasWrite && 'writeFileSync',
   ].filter((n): n is string => !!n);
   if (fsNames.length) imports.push(`import { ${fsNames.join(', ')} } from 'node:fs';`);
-  if (hasCmd || hasWrite || hasSave) {
-    imports.push(`import { dirname${hasWrite || hasSave ? ', resolve' : ''}${hasSave ? ', relative, isAbsolute' : ''} } from 'node:path';`);
+  if (hasCmd || hasWrite || hasSave || hasOpen) {
+    imports.push(`import { dirname${hasWrite || hasSave || hasOpen ? ', resolve' : ''}${hasSave ? ', relative, isAbsolute' : ''} } from 'node:path';`);
   }
   if (hasCmd) helpers.push(SHELL_HELPER_TS);
   if (hasWrite) helpers.push(WRITE_HELPER_TS);
   if (hasSave) helpers.push(SAVE_HELPER_TS);
+  if (hasOpen) helpers.push(OPEN_HELPER_TS);
   return {
     imports: imports.length ? imports.join('\n') + '\n' : '',
     helpers: helpers.length ? helpers.join('\n\n') + '\n\n' : '',
